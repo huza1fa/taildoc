@@ -6,26 +6,29 @@ package collector
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
 	"tailscale.com/client/tailscale/v2"
 
+	"github.com/huza1fa/taildoc/internal/auth"
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 // Collect gathers devices, users, and the policy file, returning a
 // normalized tailnet snapshot.
 func Collect(ctx context.Context) (*tailnet.Tailnet, error) {
-	token := os.Getenv("TS_ACCESS_TOKEN")
-	if token == "" {
-		return nil, fmt.Errorf("TS_ACCESS_TOKEN is not set; create an API key at https://login.tailscale.com/admin/settings/keys")
+	creds, _, err := auth.Resolve()
+	if err != nil {
+		return nil, err
+	}
+	if creds == nil {
+		return nil, fmt.Errorf("not authenticated: set TS_ACCESS_TOKEN or run `taildoc auth login`; create an API key at https://login.tailscale.com/admin/settings/keys")
 	}
 
-	client := &tailscale.Client{
-		APIKey:  token,
-		Tailnet: "-",
+	client, err := auth.Client(creds)
+	if err != nil {
+		return nil, err
 	}
 
 	t := &tailnet.Tailnet{
