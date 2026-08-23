@@ -12,6 +12,9 @@ import (
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
+// Version is set at build time via -ldflags "-X ...cli.Version=vX.Y.Z".
+var Version = "dev"
+
 // Run executes the CLI with the given arguments and returns an exit code.
 func Run(args []string) int {
 	if len(args) < 1 {
@@ -54,7 +57,7 @@ func Run(args []string) int {
 		usage()
 		return 0
 	case "--version", "-v", "version":
-		fmt.Println("taildoc 0.2.0")
+		fmt.Printf("taildoc %s\n", Version)
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])

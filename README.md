@@ -15,11 +15,24 @@ happened, the raw **Evidence** behind it, **Why** it matters, and a concrete
 
 ## Install
 
+**Homebrew-style script install (macOS / Linux):**
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/huza1fa/taildoc/master/install.sh | sh
+```
+
+Or download a prebuilt binary directly from the
+[releases page](https://github.com/huza1fa/taildoc/releases) — each release ships
+`tar.gz` archives (`.zip` on Windows) for linux/darwin/windows on amd64/arm64,
+plus a `checksums.txt`.
+
+**With Go:**
+
 ```sh
 go install github.com/huza1fa/taildoc/cmd/taildoc@latest
 ```
 
-Or build from source:
+**Build from source:**
 
 ```sh
 git clone https://github.com/huza1fa/taildoc && cd taildoc
