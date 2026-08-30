@@ -32,6 +32,7 @@ func Collect(ctx context.Context) (*tailnet.Tailnet, error) {
 	}
 
 	t := &tailnet.Tailnet{
+		Name:        creds.Tailnet,
 		CollectedAt: time.Now(),
 		Groups:      map[string][]string{},
 		TagOwners:   map[string][]string{},
@@ -138,6 +139,8 @@ func collectPolicy(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet)
 			Services: acl.AutoApprovers.Services,
 		}
 	}
+	t.HasAccessRules = acl.ACLs != nil || acl.Grants != nil
+	t.DefaultSrcPosture = acl.DefaultSourcePosture
 
 	// Modern grants.
 	for _, g := range acl.Grants {

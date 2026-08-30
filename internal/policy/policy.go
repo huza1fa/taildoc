@@ -38,15 +38,31 @@ type Unsupported struct {
 
 // Result is the outcome of evaluating a request.
 type Result struct {
-	Allowed     bool
-	Matches     []Match
-	Unsupported []Unsupported
+	Allowed        bool
+	Indeterminate  bool
+	DefaultAllowed bool
+	Matches        []Match
+	Unsupported    []Unsupported
 }
 
 // Evaluate checks every grant in the tailnet against the request.
 func Evaluate(t *tailnet.Tailnet, req Request) Result {
 	srcSels := SourceSelectors(t, req)
 	var res Result
+	// Snapshots created before HasAccessRules existed still contain normalized
+	// grants, which are sufficient to identify an explicit access policy.
+	hasAccessRules := t.HasAccessRules || len(t.Grants) > 0
+	if !hasAccessRules {
+		if len(t.DefaultSrcPosture) > 0 {
+			res.Indeterminate = true
+			res.Unsupported = append(res.Unsupported, Unsupported{
+				Selector: "defaultSrcPosture " + strings.Join(t.DefaultSrcPosture, ","),
+				Reason:   "posture evaluation is not yet supported; access may be more restrictive than shown",
+			})
+			return res
+		}
+		return Result{Allowed: true, DefaultAllowed: true}
+	}
 
 	for _, g := range t.Grants {
 		matched := false
@@ -70,11 +86,32 @@ func Evaluate(t *tailnet.Tailnet, req Request) Result {
 				if !portOK {
 					continue
 				}
-				if len(g.SrcPosture) > 0 {
-					res.Unsupported = append(res.Unsupported, Unsupported{
-						fmt.Sprintf("srcPosture %s", strings.Join(g.SrcPosture, ",")),
-						"posture evaluation is not yet supported; access may be more restrictive than shown",
-					})
+				if len(g.SrcPosture) > 0 || len(t.DefaultSrcPosture) > 0 || len(g.Via) > 0 || len(g.App) > 0 {
+					res.Indeterminate = true
+					if len(g.SrcPosture) > 0 {
+						res.Unsupported = append(res.Unsupported, Unsupported{
+							fmt.Sprintf("srcPosture %s", strings.Join(g.SrcPosture, ",")),
+							"posture evaluation is not yet supported; access may be more restrictive than shown",
+						})
+					}
+					if len(t.DefaultSrcPosture) > 0 {
+						res.Unsupported = append(res.Unsupported, Unsupported{
+							"defaultSrcPosture " + strings.Join(t.DefaultSrcPosture, ","),
+							"posture evaluation is not yet supported; access may be more restrictive than shown",
+						})
+					}
+					if len(g.Via) > 0 {
+						res.Unsupported = append(res.Unsupported, Unsupported{
+							"via " + strings.Join(g.Via, ","),
+							"via routing constraints are not yet supported",
+						})
+					}
+					if len(g.App) > 0 {
+						res.Unsupported = append(res.Unsupported, Unsupported{
+							"app", "application capability constraints are not yet supported",
+						})
+					}
+					continue
 				}
 				if !matched {
 					chain = append(chain,
@@ -101,9 +138,9 @@ func Evaluate(t *tailnet.Tailnet, req Request) Result {
 // SourceSelectors returns every selector that represents the request's source:
 // login name, group memberships, role autogroups, and device tags.
 func SourceSelectors(t *tailnet.Tailnet, req Request) []string {
-	var sels []string
+	sels := []string{"*"}
 	if req.SourceLogin != "" {
-		sels = append(sels, req.SourceLogin, "*")
+		sels = append(sels, req.SourceLogin)
 		sels = append(sels, t.GroupsOfUser(req.SourceLogin)...)
 		sels = append(sels, "autogroup:member")
 		if u := t.FindUser(req.SourceLogin); u != nil && tailnet.CanManage(u.Role) {
@@ -136,15 +173,16 @@ func matchDestination(t *tailnet.Tailnet, host string, req Request) (bool, strin
 	default:
 		// IP, CIDR, or host alias
 		targets := append([]string(nil), req.DestIPs...)
+		selector := host
 		if ip, ok := t.Hosts[host]; ok {
-			targets = append(targets, ip)
+			selector = ip
 		} else if !looksLikeIPOrCIDR(host) {
 			// hostname-style destination: compare against device DNS names elsewhere;
 			// for packet-level matching we only know IPs
 			return false, ""
 		}
 		for _, dip := range targets {
-			if ipMatches(host, dip) {
+			if ipMatches(selector, dip) {
 				return true, fmt.Sprintf("%s covers %s", host, dip)
 			}
 		}
@@ -210,6 +248,18 @@ func atoi(s string) int {
 // splitDst splits "tag:prod:5432" into ("tag:prod", "5432", true).
 // The tag/user prefix contains a colon itself, so only the last colon splits.
 func splitDst(dst string) (host, port string, ok bool) {
+	if _, err := netip.ParseAddr(dst); err == nil {
+		return dst, "*", true
+	}
+	if _, err := netip.ParsePrefix(dst); err == nil {
+		return dst, "*", true
+	}
+	if strings.HasPrefix(dst, "[") {
+		end := strings.Index(dst, "]")
+		if end > 0 && len(dst) > end+1 && dst[end+1] == ':' {
+			return dst[1:end], dst[end+2:], true
+		}
+	}
 	i := strings.LastIndex(dst, ":")
 	if i < 0 {
 		return dst, "*", true

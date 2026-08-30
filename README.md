@@ -17,6 +17,10 @@ happened, the raw **Evidence** behind it, **Why** it matters, and a concrete
 
 **Homebrew-style script install (macOS / Linux):**
 
+The installer verifies a keyless Sigstore signature from this repository's
+tag-release workflow. Install [cosign](https://docs.sigstore.dev/cosign/system_config/installation/)
+first.
+
 ```sh
 curl -fsSL https://raw.githubusercontent.com/huza1fa/taildoc/master/install.sh | sh
 ```
@@ -60,13 +64,13 @@ Non-interactive alternative: set `TS_ACCESS_TOKEN` to an API key; taildoc picks 
 | Command | Flags | Description |
 |---------|-------|-------------|
 | `taildoc inventory` | — | Normalized view: users, groups, devices, tag owners, grants, routers |
-| `taildoc audit` | `--output text\|json\|sarif\|markdown`, `--fail-on none\|info\|low\|medium\|high` | Run checks; findings sorted by severity |
+| `taildoc audit` | `--output text\|json\|sarif\|markdown`, `--fail-on none\|info\|low\|medium\|high`, `--snapshot file` | Run checks; findings sorted by severity |
 | `taildoc explain <src> <dst[:port]>` | — | Trace which grant allows (or denies) access between two resources |
 | `taildoc snapshot` | `--output file` | Save the live tailnet as JSON (default: timestamped `taildoc-snapshot-*.json`) |
 | `taildoc diff <old.json> [new.json]` | — | Diff two snapshots; omit the second to compare against live |
-| `taildoc graph` | `--format mermaid\|dot`, `--output file` | Render grant relationships as a dependency graph |
+| `taildoc graph` | `--format mermaid\|dot`, `--output file`, `--snapshot file` | Render grant relationships as a dependency graph |
 | `taildoc history` | `--db path` (default `taildoc.db`), `--record` | Findings over time in SQLite; `--record` captures a new run |
-| `taildoc auth login` | `--apikey K`, `--oauth-client-id ID --oauth-client-secret S`, `--tailnet NAME` | Store credentials locally after verification |
+| `taildoc auth login` | `--apikey-stdin`, `--oauth-client-id ID --oauth-client-secret-stdin`, `--tailnet NAME` | Store credentials locally after verification |
 | `taildoc auth status` | — | Show credential source, method, and verify against the API |
 | `taildoc auth logout` | — | Delete the stored credentials file |
 
@@ -86,11 +90,11 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
-          go-version: stable
-      - run: go install github.com/huza1fa/taildoc/cmd/taildoc@latest
+          go-version: "1.26.6"
+      - run: go install github.com/huza1fa/taildoc/cmd/taildoc@v0.2.0
       - name: Audit tailnet
         env:
           TS_ACCESS_TOKEN: ${{ secrets.TS_API_KEY }}
@@ -101,7 +105,7 @@ jobs:
         env:
           TS_ACCESS_TOKEN: ${{ secrets.TS_API_KEY }}
         run: taildoc audit --fail-on high >/dev/null
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
           name: taildoc-sarif
@@ -109,7 +113,7 @@ jobs:
 ```
 
 To surface findings in GitHub code scanning instead of artifacts, replace the
-upload step with `github/codeql-action/upload-sarif@v3` pointing at `taildoc.sarif`.
+upload step with `github/codeql-action/upload-sarif@6f5948dfacef28e207b48d0905cf90c03365536d` pointing at `taildoc.sarif`.
 Taildoc emits SARIF 2.1.0 with SHA-256 partial fingerprints so repeat findings
 deduplicate across runs.
 
@@ -174,6 +178,7 @@ Each finding carries `Severity`, `Detail` (What), `Evidence`, `Why`, and `Next`.
 - Resolution order: `TS_ACCESS_TOKEN` environment variable first, then the config file.
 - Credentials are verified with a read-only call before being saved; rejected credentials are never written to disk.
 - Tokens are only ever sent to `api.tailscale.com` (via the official Tailscale SDK). No telemetry, no third-party endpoints.
+- `auth login` masks interactive secrets. In automation, pipe one secret to `--apikey-stdin` or `--oauth-client-secret-stdin`; secrets are never accepted as command-line arguments.
 
 ## Development
 

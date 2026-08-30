@@ -127,6 +127,26 @@ func TestLatestRun(t *testing.T) {
 	}
 }
 
+func TestRecordEmptyRun(t *testing.T) {
+	s := openTemp(t)
+	at := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	if err := s.Record(nil, at); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	got, ok, err := s.LatestRun()
+	if err != nil || !ok || !got.Equal(at) {
+		t.Fatalf("LatestRun = %v, %v, %v; want %v, true, nil", got, ok, err, at)
+	}
+}
+
+func TestFingerprintIncludesEvidence(t *testing.T) {
+	a := audit.Finding{Severity: audit.High, Title: "Grant allows all ports", Evidence: []string{"src: tag:a"}}
+	b := audit.Finding{Severity: audit.High, Title: "Grant allows all ports", Evidence: []string{"src: tag:b"}}
+	if Fingerprint(a) == Fingerprint(b) {
+		t.Fatal("distinct affected grants must have distinct fingerprints")
+	}
+}
+
 func TestRunsOrdering(t *testing.T) {
 	s := openTemp(t)
 	a := time.Date(2026, 8, 19, 9, 0, 0, 0, time.UTC)

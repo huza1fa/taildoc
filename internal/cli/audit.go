@@ -5,17 +5,34 @@ import (
 	"fmt"
 
 	"github.com/huza1fa/taildoc/internal/audit"
+	"github.com/huza1fa/taildoc/internal/snapshot"
+	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 func runAudit(ctx context.Context, args []string) error {
 	fs := newFlagSet("audit")
 	output := fs.String("output", "text", "output format: text, json, sarif, markdown")
 	failOn := fs.String("fail-on", "none", "fail if findings meet or exceed this severity: none, info, low, medium, high")
+	snapshotPath := fs.String("snapshot", "", "audit a saved snapshot instead of collecting live data")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: taildoc audit [--output FORMAT] [--fail-on SEVERITY]")
+	}
+	if !validFailOn(*failOn) {
+		return fmt.Errorf("unknown --fail-on %q (want none, info, low, medium, or high)", *failOn)
+	}
 
-	t, err := collect(ctx)
+	var (
+		t   *tailnet.Tailnet
+		err error
+	)
+	if *snapshotPath != "" {
+		t, err = snapshot.Load(*snapshotPath)
+	} else {
+		t, err = collect(ctx)
+	}
 	if err != nil {
 		return err
 	}
@@ -111,6 +128,15 @@ func exceedsFailOn(counts map[audit.Severity]int, failOn string) bool {
 		}
 	}
 	return false
+}
+
+func validFailOn(s string) bool {
+	switch s {
+	case "none", "info", "low", "medium", "high":
+		return true
+	default:
+		return false
+	}
 }
 
 func severityColor(s audit.Severity) func(string) string {

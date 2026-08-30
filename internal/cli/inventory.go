@@ -15,6 +15,9 @@ func runInventory(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: taildoc inventory")
+	}
 
 	t, err := collect(ctx)
 	if err != nil {

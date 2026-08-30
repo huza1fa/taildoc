@@ -3,7 +3,11 @@
 package tui
 
 import (
+	"os"
+
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
@@ -12,6 +16,9 @@ import (
 // treated as static; there is no live refresh in v1 (restart the command
 // to re-collect).
 func Run(t *tailnet.Tailnet) error {
+	if os.Getenv("NO_COLOR") != "" {
+		lipgloss.SetColorProfile(termenv.Ascii)
+	}
 	if _, err := tea.NewProgram(newModel(t), tea.WithAltScreen()).Run(); err != nil {
 		return err
 	}

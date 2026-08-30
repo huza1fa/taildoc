@@ -20,12 +20,10 @@ func (m model) View() string {
 	}
 
 	if m.findingDetailOpen && len(m.findings) > 0 {
-		body := m.renderFindingDetail(m.findings[m.selectedFinding])
-		return overlayBoxStyle.Width(m.width - 4).Render(body)
+		return overlayBoxStyle.Width(max(m.width-4, 24)).Render(m.detailView.View())
 	}
 	if m.deviceDetail != nil {
-		body := m.renderDeviceDetail(m.deviceDetail)
-		return overlayBoxStyle.Width(m.width - 4).Render(body)
+		return overlayBoxStyle.Width(max(m.width-4, 24)).Render(m.detailView.View())
 	}
 
 	var body string
@@ -127,7 +125,7 @@ func (m model) renderFindingDetail(f audit.Finding) string {
 	if f.Next != "" {
 		lines = append(lines, "", detailLabelStyle.Render("Next step"), wrap(f.Next, max(m.width-12, 38)))
 	}
-	lines = append(lines, "", dimStyle.Render("esc back"))
+	lines = append(lines, "", dimStyle.Render("up/down scroll · esc back"))
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
@@ -149,7 +147,7 @@ func (m model) renderDeviceDetail(d *tailnet.Device) string {
 		detailLabelStyle.Render("Routes"),
 		routesBlock(d),
 		"",
-		dimStyle.Render("esc back"),
+		dimStyle.Render("up/down scroll · esc back"),
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }

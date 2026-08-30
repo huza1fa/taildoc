@@ -16,6 +16,9 @@ func runHistory(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: taildoc history [--db PATH] [--record]")
+	}
 
 	store, err := history.Open(*dbPath)
 	if err != nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/huza1fa/taildoc/internal/fileutil"
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
@@ -18,7 +19,7 @@ func Save(t *tailnet.Tailnet, path string) error {
 		return fmt.Errorf("marshal snapshot: %w", err)
 	}
 	data = append(data, '\n')
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if err := fileutil.WriteFileAtomic(path, data, 0o600); err != nil {
 		return fmt.Errorf("write snapshot %s: %w", path, err)
 	}
 	return nil
@@ -40,7 +41,7 @@ func Load(path string) (*tailnet.Tailnet, error) {
 // SaveDefault writes the snapshot to a timestamped file in the current
 // directory and returns the path used.
 func SaveDefault(t *tailnet.Tailnet) (string, error) {
-	stamp := time.Now().Format(time.RFC3339)
+	stamp := time.Now().Format(time.RFC3339Nano)
 	stamp = strings.NewReplacer(":", "-", ".", "-").Replace(stamp)
 	path := fmt.Sprintf("taildoc-snapshot-%s.json", stamp)
 	if err := Save(t, path); err != nil {

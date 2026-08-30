@@ -12,14 +12,16 @@ type Tailnet struct {
 	Name        string
 	CollectedAt time.Time
 
-	Users         []*User
-	Devices       []*Device
-	Groups        map[string][]string // group name -> members (from policy file)
-	TagOwners     map[string][]string // tag name -> owners (from policy file)
-	Hosts         map[string]string   // host alias -> IP
-	Grants        []*Grant            // normalized from grants + legacy ACLs
-	Postures      map[string][]string // posture name -> conditions
-	AutoApprovers AutoApprovers
+	Users             []*User
+	Devices           []*Device
+	Groups            map[string][]string // group name -> members (from policy file)
+	TagOwners         map[string][]string // tag name -> owners (from policy file)
+	Hosts             map[string]string   // host alias -> IP
+	Grants            []*Grant            // normalized from grants + legacy ACLs
+	HasAccessRules    bool                // whether acls or grants were explicitly present
+	Postures          map[string][]string // posture name -> conditions
+	DefaultSrcPosture []string            // policy-wide posture requirements
+	AutoApprovers     AutoApprovers
 }
 
 // ManagingRoles are the Tailscale roles allowed to administer a tailnet.

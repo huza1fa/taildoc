@@ -18,6 +18,7 @@ func testTailnet() *tailnet.Tailnet {
 		TagOwners: map[string][]string{
 			"tag:prod": {"bob@example.com"},
 		},
+		HasAccessRules: true,
 		Devices: []*tailnet.Device{
 			{Hostname: "laptop", Owner: "alice@example.com", Addresses: []string{"100.64.0.1"}},
 			{Hostname: "db-prod", Tags: []string{"tag:prod"}, Addresses: []string{"100.64.0.2"}},
@@ -101,11 +102,49 @@ func TestSplitDst(t *testing.T) {
 		{"10.0.0.0/24", "10.0.0.0/24", "*"},
 		{"host.example.com:443", "host.example.com", "443"},
 		{"autogroup:self", "autogroup:self", "*"},
+		{"fd7a:115c:a1e0::1", "fd7a:115c:a1e0::1", "*"},
+		{"[fd7a:115c:a1e0::1]:443", "fd7a:115c:a1e0::1", "443"},
 	}
 	for _, c := range cases {
 		host, port, ok := splitDst(c.in)
 		if !ok || host != c.host || port != c.port {
 			t.Errorf("splitDst(%q) = (%q, %q), want (%q, %q)", c.in, host, port, c.host, c.port)
 		}
+	}
+}
+
+func TestEvaluateHostAlias(t *testing.T) {
+	tn := testTailnet()
+	tn.Hosts = map[string]string{"db": "100.64.0.2"}
+	tn.Grants = []*tailnet.Grant{{Sources: []string{"group:engineering"}, Destinations: []string{"db:5432"}, IP: []string{"tcp:5432"}}}
+	if !Evaluate(tn, Request{SourceLogin: "alice@example.com", DestIPs: []string{"100.64.0.2"}, Port: "5432", Proto: "tcp"}).Allowed {
+		t.Fatal("expected host alias to match")
+	}
+}
+
+func TestEvaluateTaggedWildcardSource(t *testing.T) {
+	tn := testTailnet()
+	tn.Grants = []*tailnet.Grant{{Sources: []string{"*"}, Destinations: []string{"tag:prod:443"}, IP: []string{"tcp:443"}}}
+	if !Evaluate(tn, Request{SourceTags: []string{"tag:web"}, DestTags: []string{"tag:prod"}, Port: "443", Proto: "tcp"}).Allowed {
+		t.Fatal("expected wildcard source to include tagged devices")
+	}
+}
+
+func TestEvaluateConditionalGrantIsIndeterminate(t *testing.T) {
+	tn := testTailnet()
+	tn.Grants = []*tailnet.Grant{{Sources: []string{"group:engineering"}, Destinations: []string{"tag:prod:443"}, IP: []string{"tcp:443"}, SrcPosture: []string{"posture:trusted"}}}
+	res := Evaluate(tn, Request{SourceLogin: "alice@example.com", DestTags: []string{"tag:prod"}, Port: "443", Proto: "tcp"})
+	if res.Allowed || !res.Indeterminate {
+		t.Fatalf("want indeterminate result, got %+v", res)
+	}
+}
+
+func TestEvaluateDefaultPolicy(t *testing.T) {
+	tn := testTailnet()
+	tn.Grants = nil
+	tn.HasAccessRules = false
+	res := Evaluate(tn, Request{})
+	if !res.Allowed || !res.DefaultAllowed {
+		t.Fatalf("want default allowed, got %+v", res)
 	}
 }

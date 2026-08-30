@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"time"
 
 	"github.com/huza1fa/taildoc/internal/collector"
 	"github.com/huza1fa/taildoc/internal/tailnet"
@@ -22,7 +24,10 @@ func Run(args []string) int {
 		return 2
 	}
 
-	ctx := context.Background()
+	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
+	defer cancel()
 
 	var err error
 	switch args[0] {
@@ -85,15 +90,17 @@ Usage:
 Commands:
   auth login|status|logout            Connect to your tailnet (API key or OAuth client)
   inventory                           Show a normalized view of the tailnet
-  audit                               Analyze the tailnet for problems
-      --output text|json|sarif|markdown   Output format (default text)
-      --fail-on info|low|medium|high      Exit 3 if findings meet threshold
+   audit                               Analyze the tailnet for problems
+       --output text|json|sarif|markdown   Output format (default text)
+       --fail-on info|low|medium|high      Exit 3 if findings meet threshold
+       --snapshot file                     Analyze saved data instead of live data
   explain <source> <dest[:port]>      Explain access between two resources
   snapshot [--output file]            Save a tailnet snapshot to JSON
   diff <old.json> [new.json]          Diff two snapshots (second defaults to live)
-  graph                               Render grant relationships
-      --format mermaid|dot                Diagram format (default mermaid)
-      --output file                       Write to file instead of stdout
+   graph                               Render grant relationships
+       --format mermaid|dot                Diagram format (default mermaid)
+       --output file                       Write to file instead of stdout
+       --snapshot file                     Render saved data instead of live data
   history                             Findings over time
       --db path                           SQLite database (default taildoc.db)
       --record                            Audit now and store results
@@ -117,7 +124,7 @@ var cmdHelp = map[string]string{
 	"auth": `taildoc auth — connect to your tailnet
 
 Usage:
-  taildoc auth login  [--apikey KEY | --oauth-client-id ID --oauth-client-secret SECRET] [--tailnet NAME]
+  taildoc auth login  [--apikey-stdin | --oauth-client-id ID --oauth-client-secret-stdin] [--tailnet NAME]
   taildoc auth status
   taildoc auth logout
 
@@ -133,7 +140,7 @@ Usage:
 	"audit": `taildoc audit — analyze the tailnet and produce explainable findings
 
 Usage:
-  taildoc audit [--output FORMAT] [--fail-on SEVERITY]
+  taildoc audit [--output FORMAT] [--fail-on SEVERITY] [--snapshot FILE]
 
 Flags:
   --output text|json|sarif|markdown   Output format (default text)
@@ -170,7 +177,7 @@ With one argument, compares the saved snapshot against live tailnet data.
 	"graph": `taildoc graph — render grant relationships as a diagram
 
 Usage:
-  taildoc graph [--format mermaid|dot] [--output FILE]
+  taildoc graph [--format mermaid|dot] [--output FILE] [--snapshot FILE]
 
 Mermaid output pastes directly into GitHub markdown; dot renders with Graphviz.
 `,

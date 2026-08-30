@@ -115,6 +115,22 @@ func TestCheckBroadGrantsAllPortsWithSrc(t *testing.T) {
 	}
 }
 
+func TestCheckBroadGrantsRequiresWildcardSourceForEverything(t *testing.T) {
+	tt := &tailnet.Tailnet{Grants: []*tailnet.Grant{{Sources: []string{"group:ops"}, Destinations: []string{"*"}, IP: []string{"tcp:*"}}}}
+	findings := checkBroadGrants(tt)
+	if len(findings) != 1 || findings[0].Title != "Grant allows all ports" {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckBroadGrantsFindsWildcardSourceToTag(t *testing.T) {
+	tt := &tailnet.Tailnet{Grants: []*tailnet.Grant{{Sources: []string{"*"}, Destinations: []string{"tag:prod"}, IP: []string{"tcp:*"}}}}
+	findings := checkBroadGrants(tt)
+	if len(findings) != 1 || findings[0].Title != "Grant allows all ports" {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
 func TestCheckUnapprovedRoutes(t *testing.T) {
 	tt := &tailnet.Tailnet{
 		Devices: []*tailnet.Device{
@@ -145,7 +161,7 @@ func TestCheckUnapprovedRoutes(t *testing.T) {
 func TestCheckSingleExitNode(t *testing.T) {
 	one := &tailnet.Tailnet{
 		Devices: []*tailnet.Device{
-			{Hostname: "exit-1", AdvertisedRoutes: []string{"0.0.0.0/0"}},
+			{Hostname: "exit-1", Online: true, Authorized: true, EnabledRoutes: []string{"0.0.0.0/0"}},
 		},
 	}
 	if findings := checkSingleExitNode(one); len(findings) != 1 {
@@ -154,8 +170,8 @@ func TestCheckSingleExitNode(t *testing.T) {
 
 	two := &tailnet.Tailnet{
 		Devices: []*tailnet.Device{
-			{Hostname: "exit-1", AdvertisedRoutes: []string{"0.0.0.0/0"}},
-			{Hostname: "exit-2", AdvertisedRoutes: []string{"::/0"}},
+			{Hostname: "exit-1", Online: true, Authorized: true, EnabledRoutes: []string{"0.0.0.0/0"}},
+			{Hostname: "exit-2", Online: true, Authorized: true, EnabledRoutes: []string{"::/0"}},
 		},
 	}
 	if findings := checkSingleExitNode(two); findings != nil {

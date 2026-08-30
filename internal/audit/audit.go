@@ -170,17 +170,12 @@ func checkOutdatedClients(t *tailnet.Tailnet) []Finding {
 func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	for _, g := range t.Grants {
-		allPorts := false
-		for _, ip := range g.IP {
-			if ip == "*" || ip == "*:*" {
-				allPorts = true
-			}
-		}
-		wildcardDst := contains(g.Destinations, "*")
+		allPorts := len(g.App) == 0 && hasAllPorts(g.IP)
+		wildcardDst := hasWildcardDestination(g.Destinations)
 		wildcardSrc := contains(g.Sources, "*") || contains(g.Sources, "autogroup:member")
 
 		switch {
-		case wildcardDst && allPorts:
+		case wildcardSrc && wildcardDst && allPorts:
 			out = append(out, Finding{
 				Severity: High,
 				Title:    "Grant allows everything to everyone",
@@ -189,7 +184,7 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 				Why:      "This neutralizes tailnet access control entirely; any compromised device can reach any other.",
 				Next:     "Replace with explicit grants per source and destination. If this is intentional for a lab tailnet, document it.",
 			})
-		case wildcardDst && len(g.IP) == 0:
+		case wildcardDst && len(g.IP) == 0 && len(g.App) == 0:
 			out = append(out, Finding{
 				Severity: High,
 				Title:    "Grant allows all destinations",
@@ -198,7 +193,7 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 				Why:      "Any compromise of a covered source exposes the entire tailnet.",
 				Next:     "Restrict destinations to specific tags, hosts, or subnets.",
 			})
-		case allPorts && len(g.Destinations) > 0 && !wildcardSrc:
+		case allPorts && len(g.Destinations) > 0:
 			out = append(out, Finding{
 				Severity: Medium,
 				Title:    "Grant allows all ports",
@@ -246,7 +241,10 @@ func checkUnapprovedRoutes(t *tailnet.Tailnet) []Finding {
 func checkSingleExitNode(t *tailnet.Tailnet) []Finding {
 	var exitNodes []*tailnet.Device
 	for _, d := range t.Devices {
-		for _, r := range d.AdvertisedRoutes {
+		if !d.Authorized || !d.Online {
+			continue
+		}
+		for _, r := range d.EnabledRoutes {
 			if r == "0.0.0.0/0" || r == "::/0" {
 				exitNodes = append(exitNodes, d)
 				break
@@ -325,14 +323,17 @@ func checkInactiveUsers(t *tailnet.Tailnet) []Finding {
 	}
 	if len(suspended) > 0 {
 		names := userNames(suspended)
-		out = append(out, Finding{
-			Severity: Low,
-			Title:    fmt.Sprintf("%d suspended user(s) still referenced in the tailnet", len(suspended)),
-			Detail:   "Suspended users cannot authenticate, but their group memberships and grants remain in the policy file.",
-			Evidence: []string{"suspended: " + strings.Join(names, ", "), referencedInPolicy(t, names)},
-			Why:      "If the account is later restored, any policy references reactivate with it.",
-			Next:     "Remove suspended users from groups and grants, or delete the accounts.",
-		})
+		references := referencedInPolicy(t, names)
+		if len(references) > 0 {
+			out = append(out, Finding{
+				Severity: Low,
+				Title:    fmt.Sprintf("%d suspended user(s) still referenced in the tailnet", len(suspended)),
+				Detail:   "Suspended users cannot authenticate, but their group memberships and grants remain in the policy file.",
+				Evidence: append([]string{"suspended: " + strings.Join(names, ", ")}, references...),
+				Why:      "If the account is later restored, any policy references reactivate with it.",
+				Next:     "Remove suspended users from groups and grants, or delete the accounts.",
+			})
+		}
 	}
 	if len(idle) > 0 {
 		out = append(out, Finding{
@@ -418,19 +419,68 @@ func userNames(users []*tailnet.User) []string {
 	return names
 }
 
-func referencedInPolicy(t *tailnet.Tailnet, logins []string) string {
+func referencedInPolicy(t *tailnet.Tailnet, logins []string) []string {
 	var refs []string
 	for g, members := range t.Groups {
 		for _, m := range members {
 			if contains(logins, m) {
-				refs = append(refs, g)
+				refs = append(refs, "group: "+g)
 			}
 		}
 	}
-	if len(refs) == 0 {
-		return "policy references: none found"
+	for _, grant := range t.Grants {
+		for _, source := range grant.Sources {
+			if contains(logins, source) {
+				refs = append(refs, "grant source: "+source)
+			}
+		}
 	}
-	return "referenced in groups: " + strings.Join(refs, ", ")
+	for tag, owners := range t.TagOwners {
+		for _, owner := range owners {
+			if contains(logins, owner) {
+				refs = append(refs, "tag owner: "+tag)
+			}
+		}
+	}
+	for route, approvers := range t.AutoApprovers.Routes {
+		for _, approver := range approvers {
+			if contains(logins, approver) {
+				refs = append(refs, "route auto approver: "+route)
+			}
+		}
+	}
+	for _, approver := range t.AutoApprovers.ExitNode {
+		if contains(logins, approver) {
+			refs = append(refs, "exit-node auto approver: "+approver)
+		}
+	}
+	for service, approvers := range t.AutoApprovers.Services {
+		for _, approver := range approvers {
+			if contains(logins, approver) {
+				refs = append(refs, "service auto approver: "+service)
+			}
+		}
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func hasAllPorts(entries []string) bool {
+	for _, entry := range entries {
+		if entry == "*" || entry == "*:*" || strings.HasSuffix(entry, ":*") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasWildcardDestination(destinations []string) bool {
+	for _, dst := range destinations {
+		if dst == "*" || strings.HasPrefix(dst, "*:") {
+			return true
+		}
+	}
+	return false
 }
 
 func contains(list []string, s string) bool {

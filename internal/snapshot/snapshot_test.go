@@ -143,6 +143,13 @@ func TestRoundTrip(t *testing.T) {
 	if len(data) == 0 {
 		t.Fatal("saved file is empty")
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("snapshot mode = %o, want 600", info.Mode().Perm())
+	}
 
 	out, err := Load(path)
 	if err != nil {

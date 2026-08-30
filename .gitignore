@@ -27,6 +27,11 @@ go.work.sum
 # env file
 .env
 
+# Taildoc data exports contain tailnet topology and policy information.
+taildoc-snapshot-*.json
+taildoc.db
+taildoc.db-*
+
 # Editor/IDE
 # .idea/
 # .vscode/

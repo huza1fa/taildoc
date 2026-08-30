@@ -47,6 +47,7 @@ type model struct {
 	findingList list.Model
 	deviceTable table.Model
 	graphView   viewport.Model
+	detailView  viewport.Model
 
 	deviceOrder []*tailnet.Device
 
@@ -98,6 +99,7 @@ func newModel(t *tailnet.Tailnet) model {
 
 	gv := viewport.New(0, 0)
 	gv.SetContent(strings.Join(graphLines(graph.Edges(t)), "\n"))
+	dv := viewport.New(0, 0)
 
 	return model{
 		tailnet:     t,
@@ -107,6 +109,7 @@ func newModel(t *tailnet.Tailnet) model {
 		findingList: l,
 		deviceTable: tb,
 		graphView:   gv,
+		detailView:  dv,
 	}
 }
 
@@ -155,7 +158,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	// While a detail overlay is open, keys do not reach the widgets behind it.
 	if m.findingDetailOpen || m.deviceDetail != nil {
-		return m, nil
+		var cmd tea.Cmd
+		m.detailView, cmd = m.detailView.Update(msg)
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -178,10 +183,12 @@ func (m *model) selectItem() {
 		if sel, ok := m.findingList.SelectedItem().(findingItem); ok {
 			m.selectedFinding = sel.index
 			m.findingDetailOpen = true
+			m.refreshDetail()
 		}
 	case tabDevices:
 		if idx := m.deviceTable.Cursor(); idx >= 0 && idx < len(m.deviceOrder) {
 			m.deviceDetail = m.deviceOrder[idx]
+			m.refreshDetail()
 		}
 	}
 }
@@ -197,6 +204,20 @@ func (m *model) resize() {
 	m.deviceTable.SetHeight(h - 3)
 	m.graphView.Width = m.width - 2
 	m.graphView.Height = h - 2
+	m.refreshDetail()
+}
+
+func (m *model) refreshDetail() {
+	if m.width == 0 || (!m.findingDetailOpen && m.deviceDetail == nil) {
+		return
+	}
+	m.detailView.Width = max(m.width-8, 20)
+	m.detailView.Height = max(m.height-6, 3)
+	if m.findingDetailOpen && len(m.findings) > m.selectedFinding {
+		m.detailView.SetContent(m.renderFindingDetail(m.findings[m.selectedFinding]))
+	} else if m.deviceDetail != nil {
+		m.detailView.SetContent(m.renderDeviceDetail(m.deviceDetail))
+	}
 }
 
 func max(a, b int) int {

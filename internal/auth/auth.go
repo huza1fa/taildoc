@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 
 	"tailscale.com/client/tailscale/v2"
+
+	"github.com/huza1fa/taildoc/internal/fileutil"
 )
 
 const (
@@ -66,11 +68,14 @@ func Save(c *Credentials, path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("securing config dir: %w", err)
+	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, append(data, '\n'), 0o600); err != nil {
+	if err := fileutil.WriteFileAtomic(path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("writing %s: %w", path, err)
 	}
 	return nil

@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -113,14 +114,14 @@ func TestDiffGrantAddedRemoved(t *testing.T) {
 	for _, c := range got {
 		kinds[c.Kind+":"+c.What] = c
 	}
-	removed, ok := kinds["removed:grant [tag:ci]|[db01]|[tcp:5432]|true"]
+	removed, ok := kinds["removed:grant [tag:ci]|[db01]|[tcp:5432]|null|[]|[]|true"]
 	if !ok {
 		t.Fatalf("missing removed legacy grant: %+v", got)
 	}
 	if removed.Detail != "legacy acl" {
 		t.Fatalf("removed grant detail = %q, want \"legacy acl\"", removed.Detail)
 	}
-	added, ok := kinds["added:grant [tag:ci]|[cache]|[tcp:6379]|false"]
+	added, ok := kinds["added:grant [tag:ci]|[cache]|[tcp:6379]|null|[]|[]|false"]
 	if !ok {
 		t.Fatalf("missing added grant: %+v", got)
 	}
@@ -198,6 +199,24 @@ func TestDiffDeterministic(t *testing.T) {
 	for i := 1; i < len(a); i++ {
 		if rank(a[i].Kind) == rank(a[i-1].Kind) && a[i-1].What > a[i].What {
 			t.Fatalf("What not sorted within kind: %q > %q", a[i-1].What, a[i].What)
+		}
+	}
+}
+
+func TestDiffPolicyControlsAndConditionalGrant(t *testing.T) {
+	oldT := baseTailnet()
+	newT := baseTailnet()
+	oldT.Hosts = map[string]string{"db": "100.64.0.3"}
+	newT.Hosts = map[string]string{"db": "100.64.0.4"}
+	oldT.TagOwners = map[string][]string{"tag:prod": {"alice@example.com"}}
+	newT.TagOwners = map[string][]string{"tag:prod": {"bob@example.com"}}
+	oldT.Grants[0].SrcPosture = []string{"posture:trusted"}
+	newT.Grants[0].SrcPosture = nil
+	changes := Diff(oldT, newT)
+	joined := fmt.Sprint(changes)
+	for _, want := range []string{"host alias db", "tag owner tag:prod", "posture:trusted"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("expected %q in %s", want, joined)
 		}
 	}
 }

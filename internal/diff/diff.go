@@ -2,6 +2,7 @@
 package diff
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -28,6 +29,7 @@ func Diff(oldT, newT *tailnet.Tailnet) []Change {
 	changes = append(changes, diffDevices(oldT, newT)...)
 	changes = append(changes, diffGrants(oldT, newT)...)
 	changes = append(changes, diffGroups(oldT, newT)...)
+	changes = append(changes, diffPolicyControls(oldT, newT)...)
 	if len(changes) == 0 {
 		return nil
 	}
@@ -147,9 +149,20 @@ func grantCanonical(g *tailnet.Grant) string {
 		joinSorted(g.Sources),
 		joinSorted(g.Destinations),
 		joinSorted(g.IP),
+		canonicalJSON(g.App),
+		joinSorted(g.SrcPosture),
+		joinSorted(g.Via),
 		fmt.Sprint(g.Legacy),
 	}
 	return strings.Join(parts, "|")
+}
+
+func canonicalJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "<unserializable>"
+	}
+	return string(b)
 }
 
 func grantDetail(legacy bool) string {
@@ -263,6 +276,85 @@ func diffGroups(oldT, newT *tailnet.Tailnet) []Change {
 	return changes
 }
 
+func diffPolicyControls(oldT, newT *tailnet.Tailnet) []Change {
+	controls := func(t *tailnet.Tailnet) (*tailnet.Tailnet, bool) {
+		return t, t != nil
+	}
+	old, oldOK := controls(oldT)
+	new, newOK := controls(newT)
+	if !oldOK {
+		old = &tailnet.Tailnet{}
+	}
+	if !newOK {
+		new = &tailnet.Tailnet{}
+	}
+	changes := diffStringMap("host alias", old.Hosts, new.Hosts)
+	changes = append(changes, diffMemberMaps("tag owner", old.TagOwners, new.TagOwners)...)
+	changes = append(changes, diffMemberMaps("posture", old.Postures, new.Postures)...)
+	changes = append(changes, diffMemberMaps("auto approver route", old.AutoApprovers.Routes, new.AutoApprovers.Routes)...)
+	changes = append(changes, diffMemberMaps("auto approver service", old.AutoApprovers.Services, new.AutoApprovers.Services)...)
+	if !equalSet(old.AutoApprovers.ExitNode, new.AutoApprovers.ExitNode) {
+		changes = append(changes, Change{Kind: "changed", What: "auto approver exit nodes", Detail: fmt.Sprintf("%s -> %s", joinSorted(old.AutoApprovers.ExitNode), joinSorted(new.AutoApprovers.ExitNode))})
+	}
+	if old.HasAccessRules != new.HasAccessRules {
+		changes = append(changes, Change{Kind: "changed", What: "access policy mode", Detail: fmt.Sprintf("explicit rules %t -> %t", old.HasAccessRules, new.HasAccessRules)})
+	}
+	if !equalSet(old.DefaultSrcPosture, new.DefaultSrcPosture) {
+		changes = append(changes, Change{Kind: "changed", What: "default source posture", Detail: fmt.Sprintf("%s -> %s", joinSorted(old.DefaultSrcPosture), joinSorted(new.DefaultSrcPosture))})
+	}
+	return changes
+}
+
+func diffStringMap(kind string, old, new map[string]string) []Change {
+	keys := map[string]bool{}
+	for k := range old {
+		keys[k] = true
+	}
+	for k := range new {
+		keys[k] = true
+	}
+	var changes []Change
+	for k := range keys {
+		ov, oldOK := old[k]
+		nv, newOK := new[k]
+		what := kind + " " + k
+		switch {
+		case !oldOK:
+			changes = append(changes, Change{Kind: "added", What: what, Detail: nv})
+		case !newOK:
+			changes = append(changes, Change{Kind: "removed", What: what, Detail: ov})
+		case ov != nv:
+			changes = append(changes, Change{Kind: "changed", What: what, Detail: fmt.Sprintf("%s -> %s", ov, nv)})
+		}
+	}
+	return changes
+}
+
+func diffMemberMaps(kind string, old, new map[string][]string) []Change {
+	keys := map[string]bool{}
+	for k := range old {
+		keys[k] = true
+	}
+	for k := range new {
+		keys[k] = true
+	}
+	var changes []Change
+	for k := range keys {
+		ov, oldOK := old[k]
+		nv, newOK := new[k]
+		what := kind + " " + k
+		switch {
+		case !oldOK:
+			changes = append(changes, Change{Kind: "added", What: what, Detail: joinSorted(nv)})
+		case !newOK:
+			changes = append(changes, Change{Kind: "removed", What: what, Detail: joinSorted(ov)})
+		case !equalSet(ov, nv):
+			changes = append(changes, Change{Kind: "changed", What: what, Detail: fmt.Sprintf("%s -> %s", joinSorted(ov), joinSorted(nv))})
+		}
+	}
+	return changes
+}
+
 func toSet(ss []string) map[string]bool {
 	m := make(map[string]bool, len(ss))
 	for _, s := range ss {
@@ -275,11 +367,15 @@ func equalSet(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	sa, sb := toSet(a), toSet(b)
-	for k := range sa {
-		if !sb[k] {
+	counts := make(map[string]int, len(a))
+	for _, v := range a {
+		counts[v]++
+	}
+	for _, v := range b {
+		if counts[v] == 0 {
 			return false
 		}
+		counts[v]--
 	}
 	return true
 }

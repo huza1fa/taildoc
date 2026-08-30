@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 )
 
 type sarifResult struct {
@@ -44,10 +46,13 @@ func RenderJSON(fs []Finding) ([]byte, error) {
 
 func RenderSARIF(fs []Finding) ([]byte, error) {
 	results := make([]sarifResult, 0, len(fs))
-	for i, f := range fs {
-		sum := sha256.Sum256([]byte(string(f.Severity) + "\x00" + f.Title))
+	for _, f := range fs {
+		evidence := append([]string(nil), f.Evidence...)
+		sort.Strings(evidence)
+		sum := sha256.Sum256([]byte(string(f.Severity) + "\x00" + f.Title + "\x00" + f.Detail + "\x00" + strings.Join(evidence, "\x00")))
+		ruleSum := sha256.Sum256([]byte(f.Why + "\x00" + f.Next))
 		results = append(results, sarifResult{
-			RuleID: fmt.Sprintf("TD%03d", i),
+			RuleID: "TD-" + strings.ToUpper(hex.EncodeToString(ruleSum[:6])),
 			Level:  sarifLevel(f.Severity),
 			Message: sarifMessage{
 				Text: f.Title + ": " + f.Detail,

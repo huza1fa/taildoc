@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +21,18 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
+	if path != ":memory:" {
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			return nil, err
+		}
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, err
@@ -37,6 +51,17 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS runs (
+		recorded_at TEXT PRIMARY KEY
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO runs (recorded_at)
+		SELECT DISTINCT recorded_at FROM findings`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint)`); err != nil {
 		db.Close()
 		return nil, err
@@ -46,7 +71,9 @@ func Open(path string) (*Store, error) {
 
 // Fingerprint returns the stable identity of a finding across runs.
 func Fingerprint(f audit.Finding) string {
-	h := sha256.Sum256([]byte(string(f.Severity) + "\x00" + f.Title))
+	evidence := append([]string(nil), f.Evidence...)
+	sort.Strings(evidence)
+	h := sha256.Sum256([]byte(string(f.Severity) + "\x00" + f.Title + "\x00" + f.Detail + "\x00" + strings.Join(evidence, "\x00")))
 	return hex.EncodeToString(h[:])
 }
 
@@ -66,6 +93,9 @@ func (s *Store) Record(findings []audit.Finding, at time.Time) error {
 	defer stmt.Close()
 
 	ts := at.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.Exec(`INSERT INTO runs (recorded_at) VALUES (?)`, ts); err != nil {
+		return err
+	}
 	for _, f := range findings {
 		if _, err := stmt.Exec(ts, f.Severity, f.Title, f.Detail, f.Why, f.Next,
 			strings.Join(f.Evidence, "\n"), Fingerprint(f)); err != nil {
@@ -77,7 +107,7 @@ func (s *Store) Record(findings []audit.Finding, at time.Time) error {
 
 func (s *Store) LatestRun() (time.Time, bool, error) {
 	var ts string
-	err := s.db.QueryRow(`SELECT recorded_at FROM findings ORDER BY id DESC LIMIT 1`).Scan(&ts)
+	err := s.db.QueryRow(`SELECT recorded_at FROM runs ORDER BY recorded_at DESC LIMIT 1`).Scan(&ts)
 	if err == sql.ErrNoRows {
 		return time.Time{}, false, nil
 	}
@@ -123,7 +153,7 @@ func (s *Store) NewFindings(findings []audit.Finding) ([]audit.Finding, error) {
 }
 
 func (s *Store) Runs() ([]time.Time, error) {
-	rows, err := s.db.Query(`SELECT recorded_at FROM findings GROUP BY recorded_at ORDER BY MIN(id)`)
+	rows, err := s.db.Query(`SELECT recorded_at FROM runs ORDER BY recorded_at`)
 	if err != nil {
 		return nil, err
 	}

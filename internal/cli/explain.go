@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"strings"
 
 	"github.com/huza1fa/taildoc/internal/policy"
@@ -58,6 +59,18 @@ func resolveSource(t *tailnet.Tailnet, ref string) (*tailnet.Device, *tailnet.Us
 
 // splitDestPort separates "postgres-prod:5432" into ("postgres-prod", "5432").
 func splitDestPort(ref string) (host, port string) {
+	if _, err := netip.ParseAddr(ref); err == nil {
+		return ref, ""
+	}
+	if strings.HasPrefix(ref, "[") {
+		end := strings.Index(ref, "]")
+		if end > 0 && len(ref) > end+1 && ref[end+1] == ':' {
+			p := ref[end+2:]
+			if p == "*" || isNumeric(p) {
+				return ref[1:end], p
+			}
+		}
+	}
 	i := strings.LastIndex(ref, ":")
 	if i < 0 {
 		return ref, ""
@@ -165,6 +178,12 @@ func printExplain(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.U
 func printResult(result policy.Result, port string) {
 	fmt.Println("Access path")
 	if result.Allowed {
+		if result.DefaultAllowed {
+			fmt.Println("  no access rules are configured; Tailscale's default policy allows this path")
+			fmt.Println()
+			fmt.Println("Result: ACCESS ALLOWED")
+			return
+		}
 		for i, m := range result.Matches {
 			if i > 0 {
 				fmt.Println()
@@ -184,6 +203,10 @@ func printResult(result policy.Result, port string) {
 		}
 		fmt.Println()
 		fmt.Println("Result: ACCESS ALLOWED")
+	} else if result.Indeterminate {
+		fmt.Println("  a matching grant has conditions Taildoc cannot evaluate")
+		fmt.Println()
+		fmt.Println("Result: CANNOT DETERMINE")
 	} else {
 		fmt.Println("  (no grant produces an allow path)")
 		fmt.Println()

@@ -13,6 +13,9 @@ func runSnapshot(ctx context.Context, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: taildoc snapshot [--output FILE]")
+	}
 
 	t, err := collect(ctx)
 	if err != nil {
