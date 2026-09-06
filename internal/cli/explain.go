@@ -2,25 +2,37 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/netip"
+	"os"
 	"strings"
 
 	"github.com/huza1fa/taildoc/internal/policy"
+	"github.com/huza1fa/taildoc/internal/snapshot"
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 func runExplain(ctx context.Context, args []string) error {
 	fs := newFlagSet("explain")
+	snapshotPath := fs.String("snapshot", "", "evaluate a saved snapshot instead of collecting live data")
+	protoFlag := fs.String("proto", "", "protocol: tcp, udp, icmp (default any)")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: taildoc explain <source> <destination[:port]>")
+		return fmt.Errorf("usage: taildoc explain [--snapshot FILE] [--proto PROTO] [--json] <source> <destination[:port]>")
 	}
 
-	t, err := collect(ctx)
+	var t *tailnet.Tailnet
+	var err error
+	if *snapshotPath != "" {
+		t, err = snapshot.Load(*snapshotPath)
+	} else {
+		t, err = collect(ctx)
+	}
 	if err != nil {
 		return err
 	}
@@ -29,19 +41,39 @@ func runExplain(ctx context.Context, args []string) error {
 
 	srcDev, srcUser := resolveSource(t, srcRef)
 	if srcDev == nil && srcUser == nil {
-		return fmt.Errorf("cannot resolve source %q: no device or user matches", srcRef)
+		return fmt.Errorf("cannot resolve source %q: no device or user matches (try `taildoc inventory` to list names)", srcRef)
 	}
 
 	dstHost, dstPort := splitDestPort(dstRef)
 	dstDev, dstTag := resolveDestination(t, dstHost)
 	if dstDev == nil && dstTag == "" {
-		return fmt.Errorf("cannot resolve destination %q: no device, tag, or host alias matches", dstHost)
+		return fmt.Errorf("cannot resolve destination %q: no device, tag, or host alias matches (try `taildoc inventory` to list names)", dstHost)
 	}
 
 	req := buildRequest(t, srcDev, srcUser, dstDev, dstTag, dstPort)
-	printExplain(t, srcDev, srcUser, dstDev, dstTag, req)
+	req.Proto = *protoFlag
 
 	result := policy.Evaluate(t, req)
+	if *jsonOut {
+		out := map[string]any{
+			"source":      srcRef,
+			"destination": dstHost,
+			"port":        dstPort,
+			"proto":       req.Proto,
+			"allowed":     result.Allowed,
+			"indeterminate": result.Indeterminate,
+			"matches":     result.Matches,
+			"unsupported": result.Unsupported,
+		}
+		data, err := json.MarshalIndent(out, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(append(data, '\n'))
+		return err
+	}
+	printExplain(t, srcDev, srcUser, dstDev, dstTag, req)
+
 	printResult(result, dstPort)
 	return nil
 }

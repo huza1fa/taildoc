@@ -2,35 +2,58 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/huza1fa/taildoc/internal/snapshot"
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 func runInventory(ctx context.Context, args []string) error {
 	fs := newFlagSet("inventory")
+	snapshotPath := fs.String("snapshot", "", "audit a saved snapshot instead of collecting live data")
+	output := fs.String("output", "text", "output format: text, json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: taildoc inventory")
+		return fmt.Errorf("usage: taildoc inventory [--snapshot FILE] [--output text|json]")
 	}
 
-	t, err := collect(ctx)
+	var t *tailnet.Tailnet
+	var err error
+	if *snapshotPath != "" {
+		t, err = snapshot.Load(*snapshotPath)
+	} else {
+		t, err = collect(ctx)
+	}
 	if err != nil {
 		return err
 	}
 
-	printUsers(t)
-	printGroups(t)
-	printDevices(t)
-	printTagOwners(t)
-	printGrants(t)
-	printRouters(t)
-	return nil
+	switch *output {
+	case "json":
+		data, err := json.MarshalIndent(t, "", "  ")
+		if err != nil {
+			return err
+		}
+		_, err = os.Stdout.Write(append(data, '\n'))
+		return err
+	case "text":
+		printUsers(t)
+		printGroups(t)
+		printDevices(t)
+		printTagOwners(t)
+		printGrants(t)
+		printRouters(t)
+		return nil
+	default:
+		return fmt.Errorf("unknown --output %q (want text or json)", *output)
+	}
 }
 
 func printUsers(t *tailnet.Tailnet) {
@@ -66,7 +89,21 @@ func printGroups(t *tailnet.Tailnet) {
 
 func printDevices(t *tailnet.Tailnet) {
 	fmt.Printf("Devices (%d)\n", len(t.Devices))
-	for _, d := range t.Devices {
+	devs := append([]*tailnet.Device(nil), t.Devices...)
+	sort.Slice(devs, func(i, j int) bool {
+		hi, hj := "", ""
+		if devs[i] != nil {
+			hi = devs[i].Hostname
+		}
+		if devs[j] != nil {
+			hj = devs[j].Hostname
+		}
+		return hi < hj
+	})
+	for _, d := range devs {
+		if d == nil {
+			continue
+		}
 		status := "offline"
 		if d.Online {
 			status = "online"
@@ -115,9 +152,11 @@ func printTagOwners(t *tailnet.Tailnet) {
 }
 
 func printGrants(t *tailnet.Tailnet) {
-	kind := "grants"
 	fmt.Printf("Policy grants (%d)\n", len(t.Grants))
 	for _, g := range t.Grants {
+		if g == nil {
+			continue
+		}
 		label := "grant"
 		if g.Legacy {
 			label = "legacy acl"
@@ -131,13 +170,15 @@ func printGrants(t *tailnet.Tailnet) {
 			fmt.Printf("        posture: %s\n", strings.Join(g.SrcPosture, ", "))
 		}
 	}
-	_ = kind
 	fmt.Println()
 }
 
 func printRouters(t *tailnet.Tailnet) {
 	var exitNodes, subnetRouters []*tailnet.Device
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		isExit := false
 		for _, r := range d.AdvertisedRoutes {
 			if r == "0.0.0.0/0" || r == "::/0" {

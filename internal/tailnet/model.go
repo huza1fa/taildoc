@@ -95,10 +95,57 @@ type AutoApprovers struct {
 	Services map[string][]string
 }
 
+// Sanitize drops nil entries (e.g. from JSON "null" array items in a corrupt
+// snapshot) and ensures maps are non-nil so callers can range safely.
+func (t *Tailnet) Sanitize() {
+	if t == nil {
+		return
+	}
+	users := t.Users[:0]
+	for _, u := range t.Users {
+		if u == nil || u.LoginName == "" {
+			continue
+		}
+		users = append(users, u)
+	}
+	t.Users = users
+	devs := t.Devices[:0]
+	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
+		devs = append(devs, d)
+	}
+	t.Devices = devs
+	grants := t.Grants[:0]
+	for _, g := range t.Grants {
+		if g == nil {
+			continue
+		}
+		grants = append(grants, g)
+	}
+	t.Grants = grants
+	if t.Groups == nil {
+		t.Groups = map[string][]string{}
+	}
+	if t.TagOwners == nil {
+		t.TagOwners = map[string][]string{}
+	}
+	if t.Hosts == nil {
+		t.Hosts = map[string]string{}
+	}
+	if t.Postures == nil {
+		t.Postures = map[string][]string{}
+	}
+}
+
 // FindDevice resolves a device by hostname, DNS name, or Tailscale IP.
 // Returns nil if no device matches.
 func (t *Tailnet) FindDevice(ref string) *Device {
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		if d.Hostname == ref || d.Name == ref || trimDNS(d.Name) == ref {
 			return d
 		}
@@ -114,6 +161,9 @@ func (t *Tailnet) FindDevice(ref string) *Device {
 // FindUser resolves a user by login name or display name.
 func (t *Tailnet) FindUser(ref string) *User {
 	for _, u := range t.Users {
+		if u == nil {
+			continue
+		}
 		if u.LoginName == ref || u.DisplayName == ref {
 			return u
 		}
@@ -125,6 +175,9 @@ func (t *Tailnet) FindUser(ref string) *User {
 func (t *Tailnet) DevicesWithTag(tag string) []*Device {
 	var out []*Device
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		for _, dt := range d.Tags {
 			if dt == tag {
 				out = append(out, d)

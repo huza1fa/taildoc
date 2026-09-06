@@ -58,12 +58,18 @@ func diffUsers(oldT, newT *tailnet.Tailnet) []Change {
 	oldIdx := make(map[string]*tailnet.User)
 	if oldT != nil {
 		for _, u := range oldT.Users {
+			if u == nil || u.LoginName == "" {
+				continue
+			}
 			oldIdx[u.LoginName] = u
 		}
 	}
 	newIdx := make(map[string]*tailnet.User)
 	if newT != nil {
 		for _, u := range newT.Users {
+			if u == nil || u.LoginName == "" {
+				continue
+			}
 			newIdx[u.LoginName] = u
 		}
 	}
@@ -85,13 +91,19 @@ func diffDevices(oldT, newT *tailnet.Tailnet) []Change {
 	oldIdx := make(map[string]*tailnet.Device)
 	if oldT != nil {
 		for _, d := range oldT.Devices {
-			oldIdx[d.ID] = d
+			if d == nil {
+				continue
+			}
+			oldIdx[deviceKey(d)] = d
 		}
 	}
 	newIdx := make(map[string]*tailnet.Device)
 	if newT != nil {
 		for _, d := range newT.Devices {
-			newIdx[d.ID] = d
+			if d == nil {
+				continue
+			}
+			newIdx[deviceKey(d)] = d
 		}
 	}
 	var changes []Change
@@ -137,14 +149,39 @@ func diffDevices(oldT, newT *tailnet.Tailnet) []Change {
 }
 
 func deviceWhat(d *tailnet.Device) string {
+	if d == nil {
+		return "device (unknown)"
+	}
 	name := d.Hostname
 	if name == "" {
 		name = d.Name
 	}
+	if name == "" {
+		name = "(unknown)"
+	}
+	if d.ID == "" {
+		return fmt.Sprintf("device %s", name)
+	}
 	return fmt.Sprintf("device %s (%s)", name, d.ID)
 }
 
+func deviceKey(d *tailnet.Device) string {
+	if d.ID != "" {
+		return d.ID
+	}
+	if d.Hostname != "" {
+		return "hostname:" + d.Hostname
+	}
+	if d.Name != "" {
+		return "name:" + d.Name
+	}
+	return fmt.Sprintf("addr:%s", strings.Join(d.Addresses, ","))
+}
+
 func grantCanonical(g *tailnet.Grant) string {
+	if g == nil {
+		return "<nil>"
+	}
 	parts := []string{
 		joinSorted(g.Sources),
 		joinSorted(g.Destinations),
@@ -173,28 +210,24 @@ func grantDetail(legacy bool) string {
 }
 
 func diffGrants(oldT, newT *tailnet.Tailnet) []Change {
-	count := func(t *tailnet.Tailnet) map[string]int {
+	countAndLegacy := func(t *tailnet.Tailnet) (map[string]int, map[string]bool) {
 		m := make(map[string]int)
+		leg := make(map[string]bool)
 		if t == nil {
-			return m
+			return m, leg
 		}
 		for _, g := range t.Grants {
-			m[grantCanonical(g)]++
-		}
-		return m
-	}
-	legacy := func(t *tailnet.Tailnet, canon string) bool {
-		if t == nil {
-			return false
-		}
-		for _, g := range t.Grants {
-			if grantCanonical(g) == canon {
-				return g.Legacy
+			if g == nil {
+				continue
 			}
+			canon := grantCanonical(g)
+			m[canon]++
+			leg[canon] = g.Legacy
 		}
-		return false
+		return m, leg
 	}
-	oldCounts, newCounts := count(oldT), count(newT)
+	oldCounts, oldLegacy := countAndLegacy(oldT)
+	newCounts, newLegacy := countAndLegacy(newT)
 	var changes []Change
 	for canon, n := range newCounts {
 		added := n - oldCounts[canon]
@@ -202,7 +235,7 @@ func diffGrants(oldT, newT *tailnet.Tailnet) []Change {
 			changes = append(changes, Change{
 				Kind:   "added",
 				What:   "grant " + canon,
-				Detail: grantDetail(legacy(newT, canon)),
+				Detail: grantDetail(newLegacy[canon]),
 			})
 		}
 	}
@@ -212,7 +245,7 @@ func diffGrants(oldT, newT *tailnet.Tailnet) []Change {
 			changes = append(changes, Change{
 				Kind:   "removed",
 				What:   "grant " + canon,
-				Detail: grantDetail(legacy(oldT, canon)),
+				Detail: grantDetail(oldLegacy[canon]),
 			})
 		}
 	}
@@ -313,8 +346,13 @@ func diffStringMap(kind string, old, new map[string]string) []Change {
 	for k := range new {
 		keys[k] = true
 	}
-	var changes []Change
+	sorted := make([]string, 0, len(keys))
 	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	var changes []Change
+	for _, k := range sorted {
 		ov, oldOK := old[k]
 		nv, newOK := new[k]
 		what := kind + " " + k
@@ -338,8 +376,13 @@ func diffMemberMaps(kind string, old, new map[string][]string) []Change {
 	for k := range new {
 		keys[k] = true
 	}
-	var changes []Change
+	sorted := make([]string, 0, len(keys))
 	for k := range keys {
+		sorted = append(sorted, k)
+	}
+	sort.Strings(sorted)
+	var changes []Change
+	for _, k := range sorted {
 		ov, oldOK := old[k]
 		nv, newOK := new[k]
 		what := kind + " " + k

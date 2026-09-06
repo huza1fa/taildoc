@@ -46,10 +46,48 @@ var checks = []checkFunc{
 	checkPrivilegedUserDevices,
 }
 
+// CheckNames lists stable filter names in the same order as checks,
+// for --only/--exclude and --list-checks.
+var CheckNames = []string{
+	"stale-devices",
+	"key-expiry",
+	"outdated-clients",
+	"broad-grants",
+	"unapproved-routes",
+	"single-exit-node",
+	"orphaned-tags",
+	"inactive-users",
+	"privileged-user-devices",
+}
+
 // Run executes all checks and returns findings sorted by severity.
 func Run(t *tailnet.Tailnet) []Finding {
+	return RunFiltered(t, nil, nil)
+}
+
+// RunFiltered runs a subset of checks. If only is non-empty, only those named
+// checks run; exclude removes checks by name. Unknown names are ignored.
+func RunFiltered(t *tailnet.Tailnet, only, exclude []string) []Finding {
+	onlySet := map[string]bool{}
+	for _, n := range only {
+		onlySet[n] = true
+	}
+	exclSet := map[string]bool{}
+	for _, n := range exclude {
+		exclSet[n] = true
+	}
 	var findings []Finding
-	for _, check := range checks {
+	for i, check := range checks {
+		name := ""
+		if i < len(CheckNames) {
+			name = CheckNames[i]
+		}
+		if len(onlySet) > 0 && !onlySet[name] {
+			continue
+		}
+		if exclSet[name] {
+			continue
+		}
 		findings = append(findings, check(t)...)
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
@@ -58,13 +96,23 @@ func Run(t *tailnet.Tailnet) []Finding {
 	return findings
 }
 
+// referenceTime returns CollectedAt when set (deterministic for snapshots)
+// and falls back to wall-clock otherwise.
+func referenceTime(t *tailnet.Tailnet) time.Time {
+	if t != nil && !t.CollectedAt.IsZero() {
+		return t.CollectedAt
+	}
+	return time.Now()
+}
+
 func checkStaleDevices(t *tailnet.Tailnet) []Finding {
 	var stale30, stale90 []*tailnet.Device
+	now := referenceTime(t)
 	for _, d := range t.Devices {
-		if d.Online || d.LastSeen.IsZero() || d.IsEphemeral {
+		if d == nil || d.Online || d.LastSeen.IsZero() || d.IsEphemeral {
 			continue
 		}
-		idle := time.Since(d.LastSeen)
+		idle := now.Sub(d.LastSeen)
 		if idle > 90*24*time.Hour {
 			stale90 = append(stale90, d)
 		} else if idle > 30*24*time.Hour {
@@ -98,7 +146,11 @@ func checkStaleDevices(t *tailnet.Tailnet) []Finding {
 func checkKeyExpiry(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	var expired, expiring, noExpiry []*tailnet.Device
+	now := referenceTime(t)
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		if d.KeyExpiryDisabled {
 			noExpiry = append(noExpiry, d)
 			continue
@@ -106,7 +158,7 @@ func checkKeyExpiry(t *tailnet.Tailnet) []Finding {
 		if d.Expires.IsZero() {
 			continue
 		}
-		until := time.Until(d.Expires)
+		until := d.Expires.Sub(now)
 		switch {
 		case until <= 0:
 			expired = append(expired, d)
@@ -150,6 +202,9 @@ func checkKeyExpiry(t *tailnet.Tailnet) []Finding {
 func checkOutdatedClients(t *tailnet.Tailnet) []Finding {
 	var outdated []*tailnet.Device
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		if d.UpdateAvailable {
 			outdated = append(outdated, d)
 		}
@@ -170,6 +225,9 @@ func checkOutdatedClients(t *tailnet.Tailnet) []Finding {
 func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	for _, g := range t.Grants {
+		if g == nil {
+			continue
+		}
 		allPorts := len(g.App) == 0 && hasAllPorts(g.IP)
 		wildcardDst := hasWildcardDestination(g.Destinations)
 		wildcardSrc := contains(g.Sources, "*") || contains(g.Sources, "autogroup:member")
@@ -210,6 +268,9 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 func checkUnapprovedRoutes(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		enabled := map[string]bool{}
 		for _, r := range d.EnabledRoutes {
 			enabled[r] = true
@@ -241,6 +302,9 @@ func checkUnapprovedRoutes(t *tailnet.Tailnet) []Finding {
 func checkSingleExitNode(t *tailnet.Tailnet) []Finding {
 	var exitNodes []*tailnet.Device
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		if !d.Authorized || !d.Online {
 			continue
 		}
@@ -272,20 +336,34 @@ func checkOrphanedTags(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 
 	used := map[string]bool{}
+	orphans := map[string]bool{}
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		for _, tag := range d.Tags {
 			used[tag] = true
 			if _, owned := t.TagOwners[tag]; !owned {
-				out = append(out, Finding{
-					Severity: Medium,
-					Title:    fmt.Sprintf("Device carries tag %s with no tagOwners entry", tag),
-					Detail:   "The tag is applied to devices but nothing in the policy file defines who owns it.",
-					Evidence: []string{fmt.Sprintf("devices: %s", strings.Join(deviceNames(t.DevicesWithTag(tag)), ", "))},
-					Why:      "Without owners, nobody can manage or re-assign this tag through normal policy, and grants referencing it are hard to reason about.",
-					Next:     fmt.Sprintf("Add %s to tagOwners in the policy file.", tag),
-				})
+				orphans[tag] = true
 			}
 		}
+	}
+	// One finding per orphan tag (not per device): O(T) with a single
+	// DevicesWithTag lookup per tag instead of per device occurrence.
+	sortedOrphans := make([]string, 0, len(orphans))
+	for tag := range orphans {
+		sortedOrphans = append(sortedOrphans, tag)
+	}
+	sort.Strings(sortedOrphans)
+	for _, tag := range sortedOrphans {
+		out = append(out, Finding{
+			Severity: Medium,
+			Title:    fmt.Sprintf("Tag %s has no tagOwners entry", tag),
+			Detail:   "The tag is applied to devices but nothing in the policy file defines who owns it.",
+			Evidence: []string{fmt.Sprintf("devices: %s", strings.Join(deviceNames(t.DevicesWithTag(tag)), ", "))},
+			Why:      "Without owners, nobody can manage or re-assign this tag through normal policy, and grants referencing it are hard to reason about.",
+			Next:     fmt.Sprintf("Add %s to tagOwners in the policy file.", tag),
+		})
 	}
 
 	var unused []string
@@ -311,12 +389,19 @@ func checkOrphanedTags(t *tailnet.Tailnet) []Finding {
 func checkInactiveUsers(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	var suspended, idle []*tailnet.User
+	now := referenceTime(t)
 	for _, u := range t.Users {
+		if u == nil {
+			continue
+		}
 		switch u.Status {
 		case "suspended":
 			suspended = append(suspended, u)
 		case "idle":
-			if time.Since(u.LastSeen) > 90*24*time.Hour {
+			if u.LastSeen.IsZero() {
+				continue
+			}
+			if now.Sub(u.LastSeen) > 90*24*time.Hour {
 				idle = append(idle, u)
 			}
 		}
@@ -351,6 +436,9 @@ func checkInactiveUsers(t *tailnet.Tailnet) []Finding {
 func checkPrivilegedUserDevices(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
 		if d.Owner == "" || len(d.AdvertisedRoutes) == 0 {
 			continue
 		}
@@ -374,6 +462,9 @@ func checkPrivilegedUserDevices(t *tailnet.Tailnet) []Finding {
 func evidenceDevices(devs []*tailnet.Device) []string {
 	var ev []string
 	for _, d := range devs {
+		if d == nil {
+			continue
+		}
 		line := fmt.Sprintf("%s (%s, %s)", d.Hostname, orDash(d.OS), orDash(d.Owner))
 		if !d.LastSeen.IsZero() {
 			line += fmt.Sprintf(", last seen %s", d.LastSeen.Format("2006-01-02"))
@@ -384,6 +475,9 @@ func evidenceDevices(devs []*tailnet.Device) []string {
 }
 
 func grantEvidence(g *tailnet.Grant) []string {
+	if g == nil {
+		return []string{"[grant] (nil)"}
+	}
 	kind := "grant"
 	if g.Legacy {
 		kind = "legacy acl"
@@ -406,6 +500,9 @@ func autoApproverEvidence(t *tailnet.Tailnet) []string {
 func deviceNames(devs []*tailnet.Device) []string {
 	var names []string
 	for _, d := range devs {
+		if d == nil {
+			continue
+		}
 		names = append(names, d.Hostname)
 	}
 	return names
@@ -414,6 +511,9 @@ func deviceNames(devs []*tailnet.Device) []string {
 func userNames(users []*tailnet.User) []string {
 	var names []string
 	for _, u := range users {
+		if u == nil {
+			continue
+		}
 		names = append(names, u.LoginName)
 	}
 	return names
