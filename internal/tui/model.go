@@ -70,7 +70,7 @@ func newModel(t *tailnet.Tailnet) model {
 	l.Title = "Findings"
 	l.SetShowStatusBar(false)
 	l.SetShowPagination(true)
-	l.SetFilteringEnabled(false)
+	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 
 	cols := []table.Column{

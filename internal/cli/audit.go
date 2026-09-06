@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/huza1fa/taildoc/internal/audit"
 	"github.com/huza1fa/taildoc/internal/snapshot"
@@ -14,8 +15,17 @@ func runAudit(ctx context.Context, args []string) error {
 	output := fs.String("output", "text", "output format: text, json, sarif, markdown")
 	failOn := fs.String("fail-on", "none", "fail if findings meet or exceed this severity: none, info, low, medium, high")
 	snapshotPath := fs.String("snapshot", "", "audit a saved snapshot instead of collecting live data")
+	only := fs.String("only", "", "comma-separated checks to run (see --list-checks)")
+	exclude := fs.String("exclude", "", "comma-separated checks to skip")
+	listChecks := fs.Bool("list-checks", false, "list available checks and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *listChecks {
+		for _, n := range audit.CheckNames {
+			fmt.Println(n)
+		}
+		return nil
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: taildoc audit [--output FORMAT] [--fail-on SEVERITY]")
@@ -37,7 +47,7 @@ func runAudit(ctx context.Context, args []string) error {
 		return err
 	}
 
-	findings := audit.Run(t)
+	findings := audit.RunFiltered(t, splitCSV(*only), splitCSV(*exclude))
 
 	counts := map[audit.Severity]int{}
 	for _, f := range findings {
@@ -137,6 +147,20 @@ func validFailOn(s string) bool {
 	default:
 		return false
 	}
+}
+
+func splitCSV(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func severityColor(s audit.Severity) func(string) string {

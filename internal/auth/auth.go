@@ -117,6 +117,9 @@ func Resolve() (*Credentials, string, error) {
 // the SDK's Auth field (which auto-fetches tokens); API-key credentials use
 // basic auth via the APIKey field. The Tailnet defaults to "-".
 func Client(creds *Credentials) (*tailscale.Client, error) {
+	if creds == nil {
+		return nil, errors.New("no credentials: set TS_ACCESS_TOKEN or run `taildoc auth login`")
+	}
 	switch creds.Method {
 	case MethodOAuth:
 		if creds.ClientID == "" || creds.ClientSecret == "" {

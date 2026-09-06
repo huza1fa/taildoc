@@ -25,16 +25,23 @@ func Save(t *tailnet.Tailnet, path string) error {
 	return nil
 }
 
-// Load reads a snapshot from path.
+// Load reads a snapshot from path. It enforces a 32 MiB size limit and
+// drops nil/empty entries so corrupt files fail safe instead of panicking
+// downstream (diff/audit/policy/graph dereference these slices).
 func Load(path string) (*tailnet.Tailnet, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot %s: %w", path, err)
 	}
+	const maxSnapshotBytes = 32 << 20
+	if len(data) > maxSnapshotBytes {
+		return nil, fmt.Errorf("parse snapshot %s: file too large (%d bytes, limit %d)", path, len(data), maxSnapshotBytes)
+	}
 	var t tailnet.Tailnet
 	if err := json.Unmarshal(data, &t); err != nil {
 		return nil, fmt.Errorf("parse snapshot %s: %w", path, err)
 	}
+	t.Sanitize()
 	return &t, nil
 }
 

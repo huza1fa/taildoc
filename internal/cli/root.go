@@ -132,29 +132,32 @@ Credentials are verified against the live API before being saved to
 ~/.config/taildoc/config.json (mode 0600). TS_ACCESS_TOKEN takes precedence
 over the stored config.
 `,
-	"inventory": `taildoc inventory — normalized view of users, devices, groups, grants, and routers
+  "inventory": `taildoc inventory — normalized view of users, devices, groups, grants, and routers
 
 Usage:
-  taildoc inventory
+  taildoc inventory [--snapshot FILE] [--output text|json]
 `,
 	"audit": `taildoc audit — analyze the tailnet and produce explainable findings
 
 Usage:
-  taildoc audit [--output FORMAT] [--fail-on SEVERITY] [--snapshot FILE]
+  taildoc audit [--output FORMAT] [--fail-on SEVERITY] [--snapshot FILE] [--only CHECKS] [--exclude CHECKS]
 
 Flags:
   --output text|json|sarif|markdown   Output format (default text)
   --fail-on info|low|medium|high      Exit with code 3 when findings meet or
                                       exceed this severity (default none)
+  --only a,b --exclude c              Run/skip named checks (see --list-checks)
+  --list-checks                       List available check names
 
 Examples:
   taildoc audit --fail-on high        CI gate: fail on any high finding
   taildoc audit --output sarif        Upload result to GitHub code scanning
+  taildoc audit --only broad-grants,orphaned-tags
 `,
 	"explain": `taildoc explain — explain access between two resources
 
 Usage:
-  taildoc explain <source> <destination[:port]>
+  taildoc explain [--snapshot FILE] [--proto PROTO] [--json] <source> <destination[:port]>
 
 Source is a device hostname, IP, or user login. Destination may add a port,
 e.g. "db-prod:5432".

@@ -3,10 +3,12 @@
 package history
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -37,6 +39,20 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Single writer: modernc sqlite is a file DB; concurrent opens from
+	// cron + manual runs otherwise hit "database is locked" flakily.
+	db.SetMaxOpenConns(1)
+	pragmas := []string{
+		`PRAGMA journal_mode=WAL`,
+		`PRAGMA busy_timeout=5000`,
+		`PRAGMA synchronous=NORMAL`,
+	}
+	for _, p := range pragmas {
+		if _, err := db.Exec(p); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS findings (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		recorded_at TEXT NOT NULL,
@@ -66,19 +82,36 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_findings_recorded_at ON findings(recorded_at)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &Store{db: db}, nil
 }
 
 // Fingerprint returns the stable identity of a finding across runs.
+// Titles embed counts ("3 device(s) ...") so the leading count is stripped;
+// otherwise 2 -> 3 devices of the same issue would look like a new finding.
 func Fingerprint(f audit.Finding) string {
 	evidence := append([]string(nil), f.Evidence...)
 	sort.Strings(evidence)
-	h := sha256.Sum256([]byte(string(f.Severity) + "\x00" + f.Title + "\x00" + f.Detail + "\x00" + strings.Join(evidence, "\x00")))
+	h := sha256.Sum256([]byte(string(f.Severity) + "\x00" + normalizeTitle(f.Title) + "\x00" + f.Detail + "\x00" + strings.Join(evidence, "\x00")))
 	return hex.EncodeToString(h[:])
 }
 
+var countPrefix = regexp.MustCompile(`^\d+\s+\S+(\(s\))?\s+(defined\s+in\s+|with\s+|still\s+|inactive\s+|unseen\s+|have\s+)?`)
+
+func normalizeTitle(t string) string {
+	if loc := countPrefix.FindStringIndex(t); loc != nil && loc[0] == 0 {
+		return strings.TrimSpace(t[loc[1]:])
+	}
+	return t
+}
+
 func (s *Store) Record(findings []audit.Finding, at time.Time) error {
-	tx, err := s.db.Begin()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -139,9 +172,22 @@ func (s *Store) KnownFingerprints() (map[string]bool, error) {
 }
 
 func (s *Store) NewFindings(findings []audit.Finding) ([]audit.Finding, error) {
-	known, err := s.KnownFingerprints()
+	// Compare against the latest run only (not all-ever history): bounded,
+	// and a fixed-then-reintroduced issue correctly shows as new again.
+	latest, ok, err := s.LatestRun()
 	if err != nil {
 		return nil, err
+	}
+	if !ok {
+		return append([]audit.Finding(nil), findings...), nil
+	}
+	prev, err := s.FindingsAt(latest)
+	if err != nil {
+		return nil, err
+	}
+	known := make(map[string]bool, len(prev))
+	for _, f := range prev {
+		known[Fingerprint(f)] = true
 	}
 	var out []audit.Finding
 	for _, f := range findings {
@@ -176,7 +222,7 @@ func (s *Store) Runs() ([]time.Time, error) {
 func (s *Store) FindingsAt(at time.Time) ([]audit.Finding, error) {
 	rows, err := s.db.Query(`SELECT severity, title, detail, why, next, evidence
 		FROM findings WHERE recorded_at = ?
-		ORDER BY CASE severity WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END`,
+		ORDER BY CASE severity WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END, title, detail`,
 		at.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return nil, err
