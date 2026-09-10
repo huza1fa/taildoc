@@ -272,6 +272,19 @@ func TestDeviceRows(t *testing.T) {
 	}
 }
 
+func TestDeviceSortCycles(t *testing.T) {
+	m := newModel(fixtureTailnet())
+	m = send(m, "2")
+	m = send(m, "s")
+	if m.deviceSort != sortStatus || m.deviceOrder[0].Hostname != "web-1" {
+		t.Fatalf("status sort = %v, first device = %q", m.deviceSort, m.deviceOrder[0].Hostname)
+	}
+	m = send(m, "s")
+	if m.deviceSort != sortOwner || m.deviceOrder[0].Hostname != "web-1" {
+		t.Fatalf("owner sort = %v, first device = %q", m.deviceSort, m.deviceOrder[0].Hostname)
+	}
+}
+
 func TestGraphLines(t *testing.T) {
 	edges := graph.Edges(fixtureTailnet())
 	if len(edges) != 2 {

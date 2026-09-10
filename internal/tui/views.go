@@ -84,7 +84,8 @@ func (m model) renderOverviewTab() string {
 
 func (m model) renderDevicesTab() string {
 	m.deviceTable.SetHeight(max(m.height-4, 5))
-	return m.deviceTable.View()
+	header := detailLabelStyle.Render("Devices") + "  " + dimStyle.Render("s sort: "+m.deviceSortLabel())
+	return lipgloss.JoinVertical(lipgloss.Left, header, m.deviceTable.View())
 }
 
 func (m model) renderGraphTab() string {
@@ -98,7 +99,7 @@ func (m model) statusBar() string {
 	left := statusActiveTabStyle.Render(tabNames[m.activeTab])
 	mid := dimStyle.Render(fmt.Sprintf(" %d devices · %d users · %d findings ",
 		len(m.tailnet.Devices), len(m.tailnet.Users), len(m.findings)))
-	right := "1-3 tabs · ←→/tab switch · enter details · esc back · q quit"
+	right := "1-3 tabs · ←→/tab switch · / filter findings · s sort devices · enter details · esc back · q quit"
 	pad := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right)
 	if pad < 1 {
 		pad = 1

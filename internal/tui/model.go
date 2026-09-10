@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,6 +51,7 @@ type model struct {
 	detailView  viewport.Model
 
 	deviceOrder []*tailnet.Device
+	deviceSort  deviceSort
 
 	findingDetailOpen bool
 	selectedFinding   int
@@ -57,6 +59,14 @@ type model struct {
 
 	width, height int
 }
+
+type deviceSort int
+
+const (
+	sortHostname deviceSort = iota
+	sortStatus
+	sortOwner
+)
 
 // newModel builds the TUI model from a collected tailnet snapshot.
 // All data is captured up front; there is no live refresh in v1.
@@ -70,6 +80,8 @@ func newModel(t *tailnet.Tailnet) model {
 	l.Title = "Findings"
 	l.SetShowStatusBar(false)
 	l.SetShowPagination(true)
+	// Findings are often long enough that the built-in filter is a much faster
+	// way to get back to a particular issue than scrolling.
 	l.SetFilteringEnabled(true)
 	l.DisableQuitKeybindings()
 
@@ -122,6 +134,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resize()
 
 	case tea.KeyMsg:
+		// Let the findings list handle its filter input before applying global
+		// shortcuts; that makes typing "q" into a filter possible.
+		if m.activeTab == tabOverview && m.findingList.FilterState() == list.Filtering {
+			var cmd tea.Cmd
+			m.findingList, cmd = m.findingList.Update(msg)
+			return m, cmd
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			m.quitting = true
@@ -153,6 +172,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			m.selectItem()
 			return m, nil
+		case "s":
+			if m.activeTab == tabDevices {
+				m.cycleDeviceSort()
+				return m, nil
+			}
 		}
 	}
 
@@ -173,6 +197,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.findingList, cmd = m.findingList.Update(msg)
 	}
 	return m, cmd
+}
+
+func (m *model) cycleDeviceSort() {
+	m.deviceSort = (m.deviceSort + 1) % 3
+	sort.SliceStable(m.deviceOrder, func(i, j int) bool {
+		a, b := m.deviceOrder[i], m.deviceOrder[j]
+		switch m.deviceSort {
+		case sortStatus:
+			if a.Online != b.Online {
+				return a.Online
+			}
+		case sortOwner:
+			aOwner, bOwner := ownerTagCell(a), ownerTagCell(b)
+			if aOwner != bOwner {
+				return aOwner < bOwner
+			}
+		}
+		return a.Hostname < b.Hostname
+	})
+	m.deviceTable.SetRows(deviceRowsFor(m.deviceOrder))
+}
+
+func (m model) deviceSortLabel() string {
+	switch m.deviceSort {
+	case sortStatus:
+		return "status"
+	case sortOwner:
+		return "owner/tag"
+	default:
+		return "hostname"
+	}
 }
 
 // selectItem handles Enter on the focused tab's primary widget.
@@ -231,8 +286,12 @@ func max(a, b int) int {
 // Hostname, OS, Owner/Tags, Online status, Key expiry state. The selected
 // device is resolved through deviceOrder (parallel to rows).
 func deviceRows(t *tailnet.Tailnet) []table.Row {
-	rows := make([]table.Row, 0, len(t.Devices))
-	for _, d := range t.Devices {
+	return deviceRowsFor(t.Devices)
+}
+
+func deviceRowsFor(devices []*tailnet.Device) []table.Row {
+	rows := make([]table.Row, 0, len(devices))
+	for _, d := range devices {
 		rows = append(rows, table.Row{
 			d.Hostname,
 			d.OS,

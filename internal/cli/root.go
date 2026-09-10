@@ -26,7 +26,7 @@ func Run(args []string) int {
 
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
+	ctx, cancel := commandContext(baseCtx, args[0])
 	defer cancel()
 
 	var err error
@@ -37,6 +37,10 @@ func Run(args []string) int {
 		err = runAudit(ctx, args[1:])
 	case "explain":
 		err = runExplain(ctx, args[1:])
+	case "find":
+		err = runFind(ctx, args[1:])
+	case "show":
+		err = runShow(ctx, args[1:])
 	case "diff":
 		err = runDiff(ctx, args[1:])
 	case "snapshot":
@@ -49,6 +53,12 @@ func Run(args []string) int {
 		err = runUI(ctx, args[1:])
 	case "auth":
 		err = runAuth(ctx, args[1:])
+	case "completion":
+		err = runCompletion(args[1:])
+	case "doctor":
+		err = runDoctor(ctx, args[1:])
+	case "watch":
+		err = runWatch(ctx, args[1:])
 	case "help", "-h", "--help":
 		if len(args) > 1 {
 			if text, ok := cmdHelp[args[1]]; ok {
@@ -75,10 +85,22 @@ func Run(args []string) int {
 			fmt.Fprintln(os.Stderr, "error: findings met or exceeded --fail-on threshold")
 			return 3
 		}
+		if errors.Is(err, ErrDoctorFailed) {
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// commandContext gives one-shot commands a bounded lifetime while allowing
+// watch to continue until the user interrupts it.
+func commandContext(base context.Context, command string) (context.Context, context.CancelFunc) {
+	if command == "watch" {
+		return base, func() {}
+	}
+	return context.WithTimeout(base, 60*time.Second)
 }
 
 func usage() {
@@ -95,6 +117,8 @@ Commands:
        --fail-on info|low|medium|high      Exit 3 if findings meet threshold
        --snapshot file                     Analyze saved data instead of live data
   explain <source> <dest[:port]>      Explain access between two resources
+  find [--snapshot file] <query>      Search devices, users, tags, groups, and hosts
+  show [--snapshot file] <resource>   Show a resource and its related policy
   snapshot [--output file]            Save a tailnet snapshot to JSON
   diff <old.json> [new.json]          Diff two snapshots (second defaults to live)
    graph                               Render grant relationships
@@ -106,6 +130,9 @@ Commands:
       --record                            Audit now and store results
   ui                                  Interactive terminal dashboard
       [--snapshot file]                   Browse a saved snapshot instead of live
+  completion <bash|zsh|fish>           Generate shell completion
+  doctor [--check-api] [--collect]     Check local setup and optional API readiness
+  watch [--interval 30s] [--once]      Follow live inventory changes until interrupted
 
 First run:
   Run "taildoc auth login" to connect interactively, or set TS_ACCESS_TOKEN.
@@ -162,6 +189,23 @@ Usage:
 Source is a device hostname, IP, or user login. Destination may add a port,
 e.g. "db-prod:5432".
 `,
+	"find": `taildoc find — quickly locate a tailnet resource
+
+Usage:
+  taildoc find [--snapshot FILE] <query>
+
+Searches hostnames, DNS names, Tailscale IPs, users, tags, groups, and host
+aliases. Matches are case-insensitive substrings with fuzzy matching as a
+fallback. Use "taildoc show <resource>" to drill into a result.
+`,
+	"show": `taildoc show — show a device, user, tag, group, or host alias
+
+Usage:
+  taildoc show [--snapshot FILE] <resource>
+
+Shows related ownership, devices, group membership, routes, and policy grants.
+Use "taildoc find <query>" when you do not know the exact resource name.
+`,
 	"snapshot": `taildoc snapshot — save the current tailnet state to JSON
 
 Usage:
@@ -201,6 +245,33 @@ Tabs: overview with findings, device table, grant graph.
 Keys: 1-3/tab switch · enter details · esc close · q quit.
 
 With --snapshot, browses a saved snapshot file instead of live data.
+`,
+	"doctor": `taildoc doctor — check Taildoc setup without exposing credentials
+
+Usage:
+  taildoc doctor [--check-api] [--collect]
+
+By default, checks credential availability, config parsing, and permissions
+locally. --check-api verifies credentials with a read-only API request.
+--collect exercises the full live collection required by inventory and audit.
+`,
+	"watch": `taildoc watch — follow inventory changes
+
+Usage:
+  taildoc watch [--interval DURATION] [--once]
+
+Collects a baseline, then prints only inventory and policy changes. It makes
+read-only API calls and keeps no files. Press Ctrl-C to stop.
+`,
+	"completion": `taildoc completion — generate shell completion
+
+Usage:
+  taildoc completion <bash|zsh|fish>
+
+Examples:
+  source <(taildoc completion bash)
+  taildoc completion zsh > "${fpath[1]}/_taildoc"
+  taildoc completion fish > ~/.config/fish/completions/taildoc.fish
 `,
 }
 
