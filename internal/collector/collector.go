@@ -120,6 +120,19 @@ func collectPolicy(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet)
 		return fmt.Errorf("reading policy file (token may lack policy read scope or admin role): %w", err)
 	}
 
+	normalizePolicy(acl, t)
+	return nil
+}
+
+// normalizePolicy retains selector and legacy ACL semantics without losing
+// destination-specific ports, protocols, or posture requirements.
+func normalizePolicy(acl *tailscale.ACL, t *tailnet.Tailnet) {
+	t.Sanitize()
+	t.Grants = nil
+	for name, ranges := range acl.IPSets {
+		t.IPSets[name] = ranges
+	}
+
 	for g, members := range acl.Groups {
 		t.Groups[g] = members
 	}
@@ -154,23 +167,22 @@ func collectPolicy(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet)
 		})
 	}
 
-	// Legacy ACLs, normalized into Grant shape.
 	for _, e := range acl.ACLs {
-		if strings.ToLower(e.Action) == "deny" {
-			continue // deny entries are not part of the MVP evaluator
+		if !strings.EqualFold(e.Action, "accept") {
+			continue
 		}
-		g := &tailnet.Grant{
-			Sources:      e.Source,
-			Destinations: e.Destination,
-			Legacy:       true,
+		sources, destinations := e.Source, e.Destination
+		if sources == nil {
+			sources = e.Users
 		}
-		for _, p := range e.Ports {
-			g.IP = append(g.IP, normalizeLegacyPort(p, e.Protocol))
+		if destinations == nil {
+			destinations = e.Ports
 		}
-		t.Grants = append(t.Grants, g)
+		t.Grants = append(t.Grants, &tailnet.Grant{
+			Sources: sources, Destinations: destinations,
+			Protocol: e.Protocol, SrcPosture: e.SourcePosture, Legacy: true,
+		})
 	}
-
-	return nil
 }
 
 func normalizeTag(tag string) string {
@@ -178,17 +190,4 @@ func normalizeTag(tag string) string {
 		return "tag:" + tag
 	}
 	return tag
-}
-
-// normalizeLegacyPort converts legacy ACL "ports" ("5432", "5432:5434") plus
-// optional proto into grant-style IP entries ("tcp:5432").
-func normalizeLegacyPort(port, proto string) string {
-	switch proto {
-	case "", "tcp":
-		return "tcp:" + port
-	case "udp":
-		return "udp:" + port
-	default:
-		return proto + ":" + port
-	}
 }

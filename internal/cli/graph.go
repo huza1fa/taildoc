@@ -23,6 +23,9 @@ func runGraph(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: taildoc graph [--format mermaid|dot] [--output FILE]")
 	}
 
+	if *format != "mermaid" && *format != "dot" {
+		return usageErrorf("unknown format %q", *format)
+	}
 	var (
 		t   *tailnet.Tailnet
 		err error
@@ -43,7 +46,7 @@ func runGraph(ctx context.Context, args []string) error {
 	case "dot":
 		out = graph.DOT(t)
 	default:
-		return fmt.Errorf("unknown format %q (want mermaid or dot)", *format)
+		return usageErrorf("unknown format %q (want mermaid or dot)", *format)
 	}
 
 	if *output == "" {

@@ -1,42 +1,35 @@
-// Package policy evaluates Tailscale grant semantics locally against a
-// collected tailnet snapshot. This is a pragmatic subset of the full
-// documented syntax; anything unsupported is reported as such rather than
-// guessed at.
+// Package policy evaluates the supported subset of Tailscale policy locally.
+// Unsupported selectors and conditions produce uncertainty, never a guessed denial.
 package policy
 
 import (
 	"fmt"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
-// Request describes an access question: can the source reach the
-// destination on port/proto?
 type Request struct {
-	SourceLogin string   // owning user's login (empty for tagged devices)
-	SourceTags  []string // tags on the source device, if any
+	SourceLogin string
+	SourceTags  []string
+	SourceIPs   []string
 	DestTags    []string
 	DestIPs     []string
 	DestOwner   string
-	Port        string // "" or "*" means any port
-	Proto       string // "", "tcp", "udp", or numeric/IANA name; "" means any
+	Port        string // empty or * asks whether any port is permitted
+	Proto       string // empty asks whether any protocol is permitted
 }
 
-// Match is one grant that allows the requested access.
 type Match struct {
 	Grant *tailnet.Grant
-	Chain []string // human-readable chain: why this grant applies
+	Chain []string
 }
-
-// Unsupported records selectors Taildoc could not evaluate with certainty.
 type Unsupported struct {
 	Selector string
 	Reason   string
 }
-
-// Result is the outcome of evaluating a request.
 type Result struct {
 	Allowed        bool
 	Indeterminate  bool
@@ -45,248 +38,433 @@ type Result struct {
 	Unsupported    []Unsupported
 }
 
-// Evaluate checks every grant in the tailnet against the request.
+// Between builds a packet-policy request. Tags replace a device's user identity.
+func Between(src, dst *tailnet.Device, port, proto string) Request {
+	r := Request{Port: port, Proto: proto}
+	if src != nil {
+		r.SourceTags, r.SourceIPs = src.Tags, src.Addresses
+		if len(src.Tags) == 0 {
+			r.SourceLogin = src.Owner
+		}
+	}
+	if dst != nil {
+		r.DestTags, r.DestIPs = dst.Tags, dst.Addresses
+		if len(dst.Tags) == 0 {
+			r.DestOwner = dst.Owner
+		}
+	}
+	return r
+}
+
 func Evaluate(t *tailnet.Tailnet, req Request) Result {
-	srcSels := SourceSelectors(t, req)
-	var res Result
-	// Snapshots created before HasAccessRules existed still contain normalized
-	// grants, which are sufficient to identify an explicit access policy.
-	hasAccessRules := t.HasAccessRules || len(t.Grants) > 0
-	if !hasAccessRules {
+	if t == nil {
+		return Result{Indeterminate: true, Unsupported: []Unsupported{{"snapshot", "no snapshot available"}}}
+	}
+	if !t.HasAccessRules && len(t.Grants) == 0 {
 		if len(t.DefaultSrcPosture) > 0 {
-			res.Indeterminate = true
-			res.Unsupported = append(res.Unsupported, Unsupported{
-				Selector: "defaultSrcPosture " + strings.Join(t.DefaultSrcPosture, ","),
-				Reason:   "posture evaluation is not yet supported; access may be more restrictive than shown",
-			})
-			return res
+			return Result{Indeterminate: true, Unsupported: []Unsupported{{"defaultSrcPosture", "posture evaluation is not supported"}}}
 		}
 		return Result{Allowed: true, DefaultAllowed: true}
 	}
-
+	var res Result
 	for _, g := range t.Grants {
-		matched := false
-		var chain []string
-
-		for _, src := range g.Sources {
-			if !contains(srcSels, src) {
+		if g == nil {
+			continue
+		}
+		src, srcKnown, srcNotes := matchAny(t, g.Sources, req, true)
+		if !src && srcKnown {
+			continue
+		}
+		for _, dst := range g.Destinations {
+			host, port, ok := splitDst(dst)
+			if !ok {
+				res.Unsupported = append(res.Unsupported, Unsupported{dst, "unrecognized destination format"})
+				res.Indeterminate = true
 				continue
 			}
-			for _, dst := range g.Destinations {
-				host, port, ok := splitDst(dst)
-				if !ok {
-					res.Unsupported = append(res.Unsupported, Unsupported{dst, "unrecognized destination format"})
+			dm, dk, dn := matchSelector(t, host, req, false, map[string]bool{})
+			if !dm && dk {
+				continue
+			}
+			// App capabilities do not themselves grant packet access. A grant may
+			// independently provide both network and application permissions.
+			if !g.Legacy && len(g.IP) == 0 {
+				if len(g.App) > 0 {
 					continue
 				}
-				dstMatch, how := matchDestination(t, host, req)
-				if !dstMatch {
+				res.Indeterminate = true
+				res.Unsupported = append(res.Unsupported, Unsupported{"ip", "grant has no network or application permissions"})
+				continue
+			}
+			if g.Legacy {
+				gp := g.Protocol
+				if gp == "" && req.Proto != "" && normalizeProto(req.Proto) != "tcp" && normalizeProto(req.Proto) != "udp" && normalizeProto(req.Proto) != "icmp" {
 					continue
 				}
-				portOK, why := matchPorts(g.IP, port, req.Port, req.Proto)
-				if !portOK {
+				if gp != "" && req.Proto != "" && normalizeProto(req.Proto) != "icmp" && normalizeProto(gp) != normalizeProto(req.Proto) {
 					continue
-				}
-				if len(g.SrcPosture) > 0 || len(t.DefaultSrcPosture) > 0 || len(g.Via) > 0 || len(g.App) > 0 {
-					res.Indeterminate = true
-					if len(g.SrcPosture) > 0 {
-						res.Unsupported = append(res.Unsupported, Unsupported{
-							fmt.Sprintf("srcPosture %s", strings.Join(g.SrcPosture, ",")),
-							"posture evaluation is not yet supported; access may be more restrictive than shown",
-						})
-					}
-					if len(t.DefaultSrcPosture) > 0 {
-						res.Unsupported = append(res.Unsupported, Unsupported{
-							"defaultSrcPosture " + strings.Join(t.DefaultSrcPosture, ","),
-							"posture evaluation is not yet supported; access may be more restrictive than shown",
-						})
-					}
-					if len(g.Via) > 0 {
-						res.Unsupported = append(res.Unsupported, Unsupported{
-							"via " + strings.Join(g.Via, ","),
-							"via routing constraints are not yet supported",
-						})
-					}
-					if len(g.App) > 0 {
-						res.Unsupported = append(res.Unsupported, Unsupported{
-							"app", "application capability constraints are not yet supported",
-						})
-					}
-					continue
-				}
-				if !matched {
-					chain = append(chain,
-						fmt.Sprintf("source %q matches via %s", describeSource(req), src),
-						fmt.Sprintf("destination matches %s (%s)", dst, how),
-						fmt.Sprintf("ports allow %s", why),
-					)
-					matched = true
 				}
 			}
-			if matched {
-				break
+			validIP := true
+			for _, entry := range g.IP {
+				proto, spec, hasProto := strings.Cut(entry, ":")
+				if !hasProto {
+					spec = entry
+				}
+				if len(PortRanges(spec)) == 0 || (hasProto && proto != "*" && !ValidProtocol(proto)) {
+					validIP = false
+				}
 			}
-		}
-		if matched {
-			res.Matches = append(res.Matches, Match{Grant: g, Chain: chain})
+			if !validIP {
+				res.Indeterminate = true
+				res.Unsupported = append(res.Unsupported, Unsupported{"ip " + strings.Join(g.IP, ","), "network expression is not supported"})
+				continue
+			}
+			want, proto := req.Port, req.Proto
+			// ACLs implicitly allow ICMP whenever they permit traffic for a pair.
+			// ICMP has no destination port; inspect whether any ACL port is allowed.
+			if g.Legacy && normalizeProto(proto) == "icmp" {
+				want, proto = "", ""
+			}
+			entries := g.IP
+			if g.Legacy && len(entries) == 0 {
+				entries = []string{"*:*"}
+			}
+			pm, why := matchPorts(entries, port, want, proto)
+			if !pm {
+				continue
+			}
+			notes := append(append([]Unsupported{}, srcNotes...), dn...)
+			posture := g.SrcPosture
+			if posture == nil {
+				posture = t.DefaultSrcPosture
+			}
+			if len(posture) > 0 {
+				notes = append(notes, Unsupported{"srcPosture " + strings.Join(posture, ","), "posture evaluation is not supported"})
+			}
+			if len(g.Via) > 0 {
+				notes = append(notes, Unsupported{"via " + strings.Join(g.Via, ","), "routing constraints cannot be evaluated locally"})
+			}
+			if !srcKnown || !dk || len(notes) > 0 {
+				res.Indeterminate = true
+				res.Unsupported = append(res.Unsupported, notes...)
+				continue
+			}
+			res.Matches = append(res.Matches, Match{g, []string{
+				fmt.Sprintf("source %q matches a source selector", describeSource(req)),
+				fmt.Sprintf("destination matches %s", dst),
+				"ports allow " + why,
+			}})
+			break
 		}
 	}
-
 	res.Allowed = len(res.Matches) > 0
+	// A certain allow wins over uncertain alternative paths.
+	if res.Allowed {
+		res.Indeterminate = false
+	}
 	return res
 }
 
-// SourceSelectors returns every selector that represents the request's source:
-// login name, group memberships, role autogroups, and device tags.
 func SourceSelectors(t *tailnet.Tailnet, req Request) []string {
 	sels := []string{"*"}
+	if len(req.SourceTags) > 0 {
+		return append(append(sels, "autogroup:tagged"), req.SourceTags...)
+	}
 	if req.SourceLogin != "" {
 		sels = append(sels, req.SourceLogin)
 		sels = append(sels, t.GroupsOfUser(req.SourceLogin)...)
-		sels = append(sels, "autogroup:member")
-		if u := t.FindUser(req.SourceLogin); u != nil && tailnet.CanManage(u.Role) {
-			sels = append(sels, "autogroup:admin")
+		if u := t.FindUser(req.SourceLogin); u != nil {
+			if u.Type != "shared" {
+				sels = append(sels, "autogroup:member")
+			}
+			if u.Role != "" {
+				sels = append(sels, "autogroup:"+u.Role)
+			}
+			if u.Role == "owner" {
+				sels = append(sels, "autogroup:admin")
+			}
 		}
 	}
-	sels = append(sels, req.SourceTags...)
 	return sels
 }
 
-func matchDestination(t *tailnet.Tailnet, host string, req Request) (bool, string) {
+func matchAny(t *tailnet.Tailnet, selectors []string, req Request, source bool) (bool, bool, []Unsupported) {
+	known := true
+	var notes []Unsupported
+	for _, sel := range selectors {
+		match, k, n := matchSelector(t, sel, req, source, map[string]bool{})
+		if match && k {
+			return true, true, nil
+		}
+		if !k {
+			known = false
+			notes = append(notes, n...)
+		}
+	}
+	return false, known, notes
+}
+
+func matchSelector(t *tailnet.Tailnet, sel string, req Request, source bool, visiting map[string]bool) (bool, bool, []Unsupported) {
+	unknown := func(reason string) (bool, bool, []Unsupported) { return false, false, []Unsupported{{sel, reason}} }
+	login, tags, ips := req.DestOwner, req.DestTags, req.DestIPs
+	if source {
+		login, tags, ips = req.SourceLogin, req.SourceTags, req.SourceIPs
+	}
 	switch {
-	case host == "*":
-		return true, "wildcard"
-	case strings.HasPrefix(host, "tag:"):
-		for _, dt := range req.DestTags {
-			if dt == host {
-				return true, fmt.Sprintf("device carries %s", host)
+	case sel == "*":
+		// Wildcards cover tailnet devices and approved routes, not arbitrary
+		// internet addresses. Abstract identity/tag queries have no concrete IP.
+		if len(ips) == 0 || login != "" || len(tags) > 0 {
+			return true, true, nil
+		}
+		for _, ip := range ips {
+			for _, d := range t.Devices {
+				if d == nil {
+					continue
+				}
+				if contains(d.Addresses, ip) {
+					return true, true, nil
+				}
+				for _, r := range d.EnabledRoutes {
+					if ipMatches(r, ip) {
+						return true, true, nil
+					}
+				}
 			}
 		}
-		return false, ""
-	case strings.HasPrefix(host, "autogroup:self"):
-		return req.DestOwner != "" && req.DestOwner == req.SourceLogin, "destination owned by source user"
-	case strings.HasPrefix(host, "autogroup:"):
-		// autogroup:internet etc. cannot be reliably matched to a device here
-		return false, ""
-	case strings.HasPrefix(host, "group:") || strings.Contains(host, "@"):
-		// users/groups are not valid packet destinations; ignore for device matching
-		return false, ""
+		return false, true, nil
+	case strings.HasPrefix(sel, "tag:"):
+		return contains(tags, sel), true, nil
+	case sel == "autogroup:self":
+		if source {
+			return unknown("autogroup:self is only supported as a destination")
+		}
+		return len(tags) == 0 && req.SourceLogin != "" && req.SourceLogin == login, true, nil
+	case sel == "autogroup:tagged":
+		return len(tags) > 0, true, nil
+	case strings.HasPrefix(sel, "group:"):
+		members, ok := t.Groups[sel]
+		if !ok {
+			return unknown("group definition is unavailable")
+		}
+		return len(tags) == 0 && contains(members, login), true, nil
+	case strings.Contains(sel, "@") && !strings.Contains(sel, ":"):
+		return len(tags) == 0 && login == sel, true, nil
+	case strings.HasPrefix(sel, "autogroup:"):
+		role := strings.TrimPrefix(sel, "autogroup:")
+		switch role {
+		case "member", "admin", "owner", "it-admin", "network-admin", "billing-admin", "auditor":
+			if login == "" || len(tags) > 0 {
+				return false, true, nil
+			}
+			u := t.FindUser(login)
+			if u == nil {
+				return unknown("user role is unavailable")
+			}
+			if role == "member" {
+				return u.Type != "shared", true, nil
+			}
+			return u.Role == role || (role == "admin" && u.Role == "owner"), true, nil
+		default:
+			return unknown("autogroup selector is not supported")
+		}
+	case strings.HasPrefix(sel, "ipset:"):
+		ranges, ok := t.IPSets[sel]
+		if !ok {
+			ranges, ok = t.IPSets[strings.TrimPrefix(sel, "ipset:")]
+		}
+		if !ok || visiting[sel] {
+			return unknown("IP set is missing or cyclic")
+		}
+		visiting[sel] = true
+		defer delete(visiting, sel)
+		known := true
+		var notes []Unsupported
+		for _, r := range ranges {
+			m, k, n := matchSelector(t, r, req, source, visiting)
+			if m && k {
+				return true, true, nil
+			}
+			if !k {
+				known = false
+				notes = append(notes, n...)
+			}
+		}
+		return false, known, notes
 	default:
-		// IP, CIDR, or host alias
-		targets := append([]string(nil), req.DestIPs...)
-		selector := host
-		if ip, ok := t.Hosts[host]; ok {
-			selector = ip
-		} else if !looksLikeIPOrCIDR(host) {
-			// hostname-style destination: compare against device DNS names elsewhere;
-			// for packet-level matching we only know IPs
-			return false, ""
+		target := sel
+		if alias, ok := t.Hosts[sel]; ok {
+			target = alias
 		}
-		for _, dip := range targets {
-			if ipMatches(selector, dip) {
-				return true, fmt.Sprintf("%s covers %s", host, dip)
+		if !looksLikeIPOrCIDR(target) {
+			return unknown("selector is not supported")
+		}
+		if len(ips) == 0 {
+			return unknown("device IP addresses are unavailable")
+		}
+		for _, ip := range ips {
+			if ipMatches(target, ip) {
+				return true, true, nil
 			}
 		}
-		return false, ""
+		return false, true, nil
 	}
 }
 
-// matchPorts reports whether the grant's ip entries permit the requested
-// destination port. grantPort is the port embedded in the dst selector.
-func matchPorts(grantIPs []string, grantDstPort, wantPort, proto string) (bool, string) {
-	if len(grantIPs) == 0 && grantDstPort == "*" {
-		return true, "(grant has no ip restriction)"
+// matchPorts intersects destination ports with grant IP entries. Empty grant
+// entries are used only by legacy ACLs; their ports remain in the destination.
+func matchPorts(entries []string, dstPort, want, proto string) (bool, string) {
+	if dstPort == "" {
+		dstPort = "*"
 	}
-	effective := grantIPs
-	if len(effective) == 0 {
-		// legacy ACL ports were normalized into IP entries at collect time
-		effective = []string{"*"}
+	if want != "" && want != "*" && !portInRange(dstPort, want) {
+		return false, ""
 	}
-	for _, entry := range effective {
-		pProto, pSpec, hasProto := strings.Cut(entry, ":")
+	if len(entries) == 0 {
+		entries = []string{"*"}
+	}
+	for _, entry := range entries {
+		p, spec, hasProto := strings.Cut(entry, ":")
 		if !hasProto {
-			pProto, pSpec = "", entry
+			p, spec = "", entry
 		}
-		if hasProto && proto != "" && !strings.EqualFold(pProto, proto) {
+		if !hasProto && proto != "" {
+			switch normalizeProto(proto) {
+			case "tcp", "udp":
+			case "icmp":
+				if rangesOverlap(dstPort, spec) {
+					return true, "ICMP implied by " + entry
+				}
+				continue
+			default:
+				continue
+			}
+		}
+		if p != "" && p != "*" && proto != "" && normalizeProto(p) != normalizeProto(proto) {
 			continue
 		}
-		if pSpec == "*" || pSpec == "" {
-			return true, entry
-		}
-		want := coalesce(wantPort, grantDstPort)
-		if want == "*" || want == "" {
-			continue // need a concrete port to confirm; wildcard dst port means any
-		}
-		if portInRange(pSpec, want) {
+		if want == "" || want == "*" {
+			if rangesOverlap(dstPort, spec) {
+				return true, entry + " intersected with " + dstPort
+			}
+		} else if portInRange(spec, want) {
 			return true, fmt.Sprintf("%s (requested %s)", entry, want)
 		}
 	}
 	return false, ""
 }
 
-func portInRange(spec, port string) bool {
-	if spec == port {
-		return true
+// PortRanges parses wildcard, comma-separated ports, and inclusive ranges.
+// It is shared with access-impact analysis to examine whole intervals exactly.
+func PortRanges(spec string) [][2]int {
+	var out [][2]int
+	for _, part := range strings.Split(spec, ",") {
+		if part == "*" {
+			out = append(out, [2]int{0, 65535})
+			continue
+		}
+		lo, hi, rangeOK := strings.Cut(part, "-")
+		if !rangeOK {
+			hi = lo
+		}
+		a, e1 := strconv.Atoi(lo)
+		b, e2 := strconv.Atoi(hi)
+		if e1 != nil || e2 != nil || a < 0 || b > 65535 || a > b {
+			return nil
+		}
+		out = append(out, [2]int{a, b})
 	}
-	if lo, hi, ok := strings.Cut(spec, "-"); ok {
-		p := atoi(port)
-		return p >= atoi(lo) && p <= atoi(hi)
+	return out
+}
+func portInRange(spec, port string) bool {
+	p, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	for _, r := range PortRanges(spec) {
+		if p >= r[0] && p <= r[1] {
+			return true
+		}
 	}
 	return false
 }
-
-func atoi(s string) int {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return -1
+func rangesOverlap(a, b string) bool {
+	for _, x := range PortRanges(a) {
+		for _, y := range PortRanges(b) {
+			if x[0] <= y[1] && y[0] <= x[1] {
+				return true
+			}
 		}
-		n = n*10 + int(c-'0')
 	}
-	return n
+	return false
+}
+func normalizeProto(p string) string {
+	switch strings.ToLower(p) {
+	case "6":
+		return "tcp"
+	case "17":
+		return "udp"
+	case "1", "58", "ipv6-icmp":
+		return "icmp"
+	case "132":
+		return "sctp"
+	case "2":
+		return "igmp"
+	case "4", "ip-in-ip":
+		return "ipv4"
+	case "8":
+		return "egp"
+	case "9":
+		return "igp"
+	case "47":
+		return "gre"
+	case "50":
+		return "esp"
+	case "51":
+		return "ah"
+	}
+	return strings.ToLower(p)
 }
 
-// splitDst splits "tag:prod:5432" into ("tag:prod", "5432", true).
-// The tag/user prefix contains a colon itself, so only the last colon splits.
+// SplitDestination separates a selector from legacy destination ports.
+func SplitDestination(dst string) (string, string, bool) { return splitDst(dst) }
 func splitDst(dst string) (host, port string, ok bool) {
-	if _, err := netip.ParseAddr(dst); err == nil {
-		return dst, "*", true
-	}
-	if _, err := netip.ParsePrefix(dst); err == nil {
+	if looksLikeIPOrCIDR(dst) {
 		return dst, "*", true
 	}
 	if strings.HasPrefix(dst, "[") {
 		end := strings.Index(dst, "]")
 		if end > 0 && len(dst) > end+1 && dst[end+1] == ':' {
-			return dst[1:end], dst[end+2:], true
+			p := dst[end+2:]
+			return dst[1:end], p, len(PortRanges(p)) > 0
 		}
+		return dst, "", false
 	}
 	i := strings.LastIndex(dst, ":")
 	if i < 0 {
+		return dst, "*", dst != ""
+	}
+	if p := dst[i+1:]; len(PortRanges(p)) > 0 {
+		return dst[:i], p, true
+	}
+	// A namespace separator is not a port separator.
+	if strings.Count(dst, ":") == 1 {
 		return dst, "*", true
 	}
-	host, port = dst[:i], dst[i+1:]
-	// make sure the part after the last colon is actually a port or *
-	if port != "*" && atoi(port) < 0 {
-		return dst, "*", true
-	}
-	return host, port, true
+	return dst, "", false
 }
-
 func ipMatches(selector, ip string) bool {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
-		return selector == ip
+		return false
 	}
 	if prefix, err := netip.ParsePrefix(selector); err == nil {
 		return prefix.Contains(addr)
 	}
-	selAddr, err := netip.ParseAddr(selector)
-	if err != nil {
-		return selector == ip
-	}
-	return selAddr == addr
+	sel, err := netip.ParseAddr(selector)
+	return err == nil && sel == addr
 }
-
 func looksLikeIPOrCIDR(s string) bool {
 	if _, err := netip.ParsePrefix(s); err == nil {
 		return true
@@ -294,16 +472,14 @@ func looksLikeIPOrCIDR(s string) bool {
 	_, err := netip.ParseAddr(s)
 	return err == nil
 }
-
 func describeSource(req Request) string {
 	if req.SourceLogin != "" {
 		return req.SourceLogin
 	}
-	return strings.Join(req.SourceTags, ", ")
+	return strings.Join(append(append([]string{}, req.SourceTags...), req.SourceIPs...), ", ")
 }
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
 		if v == s {
 			return true
 		}
@@ -311,9 +487,15 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-func coalesce(a, b string) string {
-	if a != "" {
-		return a
+// ValidProtocol accepts supported IANA names or numbers. The evaluator treats
+// numeric and named aliases equivalently.
+func ValidProtocol(p string) bool {
+	if n, err := strconv.Atoi(p); err == nil {
+		return n >= 1 && n <= 255
 	}
-	return b
+	switch strings.ToLower(p) {
+	case "tcp", "udp", "icmp", "ipv6-icmp", "sctp", "igmp", "ipv4", "ip-in-ip", "egp", "igp", "gre", "esp", "ah":
+		return true
+	}
+	return false
 }

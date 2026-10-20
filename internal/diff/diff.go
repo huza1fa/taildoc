@@ -13,9 +13,9 @@ import (
 // Change describes a single difference between two snapshots.
 // Kind is one of "added", "removed", or "changed".
 type Change struct {
-	Kind   string
-	What   string
-	Detail string
+	Kind   string `json:"kind"`
+	What   string `json:"what"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // Diff compares oldT against newT. Changes are ordered: added first, then
@@ -191,6 +191,12 @@ func grantCanonical(g *tailnet.Grant) string {
 		joinSorted(g.Via),
 		fmt.Sprint(g.Legacy),
 	}
+	if g.Protocol != "" {
+		parts = append(parts, "proto="+g.Protocol)
+	}
+	if g.SrcPosture != nil && len(g.SrcPosture) == 0 {
+		parts = append(parts, "posture=empty")
+	}
 	return strings.Join(parts, "|")
 }
 
@@ -324,6 +330,7 @@ func diffPolicyControls(oldT, newT *tailnet.Tailnet) []Change {
 	changes := diffStringMap("host alias", old.Hosts, new.Hosts)
 	changes = append(changes, diffMemberMaps("tag owner", old.TagOwners, new.TagOwners)...)
 	changes = append(changes, diffMemberMaps("posture", old.Postures, new.Postures)...)
+	changes = append(changes, diffMemberMaps("IP set", old.IPSets, new.IPSets)...)
 	changes = append(changes, diffMemberMaps("auto approver route", old.AutoApprovers.Routes, new.AutoApprovers.Routes)...)
 	changes = append(changes, diffMemberMaps("auto approver service", old.AutoApprovers.Services, new.AutoApprovers.Services)...)
 	if !equalSet(old.AutoApprovers.ExitNode, new.AutoApprovers.ExitNode) {

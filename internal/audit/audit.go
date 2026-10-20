@@ -3,11 +3,15 @@
 package audit
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/huza1fa/taildoc/internal/policy"
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
@@ -24,6 +28,8 @@ var severityOrder = map[Severity]int{High: 0, Medium: 1, Low: 2, Info: 3}
 
 // Finding is a single explainable audit result.
 type Finding struct {
+	RuleID   string `json:",omitempty"`
+	Subject  string `json:",omitempty"`
 	Severity Severity
 	Title    string
 	Detail   string
@@ -88,7 +94,13 @@ func RunFiltered(t *tailnet.Tailnet, only, exclude []string) []Finding {
 		if exclSet[name] {
 			continue
 		}
-		findings = append(findings, check(t)...)
+		for _, f := range check(t) {
+			f.RuleID = name
+			if f.Subject == "" {
+				f.Subject = findingSubject(name, f)
+			}
+			findings = append(findings, f)
+		}
 	}
 	sort.SliceStable(findings, func(i, j int) bool {
 		return severityOrder[findings[i].Severity] < severityOrder[findings[j].Severity]
@@ -228,7 +240,16 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 		if g == nil {
 			continue
 		}
-		allPorts := len(g.App) == 0 && hasAllPorts(g.IP)
+		allPorts := hasAllPorts(g.IP)
+		if g.Legacy {
+			allPorts = false
+			for _, dst := range g.Destinations {
+				_, p, ok := policy.SplitDestination(dst)
+				if ok && p == "*" && (len(g.IP) == 0 || hasAllPorts(g.IP)) {
+					allPorts = true
+				}
+			}
+		}
 		wildcardDst := hasWildcardDestination(g.Destinations)
 		wildcardSrc := contains(g.Sources, "*") || contains(g.Sources, "autogroup:member")
 
@@ -287,6 +308,7 @@ func checkUnapprovedRoutes(t *tailnet.Tailnet) []Finding {
 		out = append(out, Finding{
 			Severity: Medium,
 			Title:    fmt.Sprintf("%s advertises route(s) that are not enabled", d.Hostname),
+			Subject:  deviceSubject(d),
 			Detail:   "The device advertises subnet routes that have not been approved, so traffic to those subnets will not route through it.",
 			Evidence: append([]string{
 				fmt.Sprintf("device: %s (%s)", d.Hostname, orDash(d.Owner)),
@@ -445,6 +467,7 @@ func checkPrivilegedUserDevices(t *tailnet.Tailnet) []Finding {
 		out = append(out, Finding{
 			Severity: Low,
 			Title:    fmt.Sprintf("User-owned device %s provides routing", d.Hostname),
+			Subject:  deviceSubject(d),
 			Detail:   "A personally-owned device (not tagged) acts as a subnet router or exit node.",
 			Evidence: []string{
 				fmt.Sprintf("device: %s, owner: %s", d.Hostname, d.Owner),
@@ -483,9 +506,9 @@ func grantEvidence(g *tailnet.Grant) []string {
 		kind = "legacy acl"
 	}
 	return []string{
-		fmt.Sprintf("[%s] src: %s", kind, strings.Join(g.Sources, ", ")),
-		fmt.Sprintf("dst: %s", strings.Join(g.Destinations, ", ")),
-		fmt.Sprintf("ip: %s", orDefault(strings.Join(g.IP, ", "), "(all)")),
+		fmt.Sprintf("[%s] src: %s", kind, sortedJoin(g.Sources)),
+		fmt.Sprintf("dst: %s", sortedJoin(g.Destinations)),
+		fmt.Sprintf("ip: %s", g.NetworkSummary()),
 	}
 }
 
@@ -604,4 +627,37 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// Subjects identify the issue rather than mutable evidence such as last-seen
+// dates and affected-device counts. Aggregate findings track a check category.
+var leadingCount = regexp.MustCompile(`^\d+\s+`)
+
+func findingSubject(rule string, f Finding) string {
+	title := leadingCount.ReplaceAllString(f.Title, "")
+	switch rule {
+	case "broad-grants":
+		ev := append([]string(nil), f.Evidence...)
+		sort.Strings(ev)
+		sum := sha256.Sum256([]byte(strings.Join(ev, "\x00")))
+		return hex.EncodeToString(sum[:])
+
+	}
+	return title
+}
+
+func sortedJoin(values []string) string {
+	copy := append([]string(nil), values...)
+	sort.Strings(copy)
+	return strings.Join(copy, ", ")
+}
+
+func deviceSubject(d *tailnet.Device) string {
+	if d.ID != "" {
+		return d.ID
+	}
+	if d.Hostname != "" {
+		return d.Hostname
+	}
+	return d.Name
 }

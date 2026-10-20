@@ -19,6 +19,15 @@ func (m model) View() string {
 		return dimStyle.Render("Loading taildoc…")
 	}
 
+	if m.width < 45 || m.height < 12 {
+		return "Resize the terminal to at least 45 columns × 12 rows. Press q to quit."
+	}
+	if m.explainEditing {
+		return m.renderExplainInput()
+	}
+	if m.explanationOpen {
+		return overlayBoxStyle.Width(max(m.width-4, 24)).Render(m.detailView.View())
+	}
 	if m.findingDetailOpen && len(m.findings) > 0 {
 		return overlayBoxStyle.Width(max(m.width-4, 24)).Render(m.detailView.View())
 	}
@@ -57,54 +66,95 @@ func (m model) renderTabs() string {
 	return header
 }
 
-func (m model) renderOverviewTab() string {
+func (m model) overviewHeader() string {
 	t := m.tailnet
 	counts := severityCounts(m.findings)
-
 	lines := []string{
 		detailLabelStyle.Render("Tailnet") + "  " + orDash(t.Name),
-		fmt.Sprintf("%s %d   %s %d   %s %d",
-			detailLabelStyle.Render("Users"), len(t.Users),
-			detailLabelStyle.Render("Devices"), len(t.Devices),
-			detailLabelStyle.Render("Grants"), len(t.Grants)),
+		fmt.Sprintf("Users %d · Devices %d · Grants %d", len(t.Users), len(t.Devices), len(t.Grants)),
 		"",
-		sevBadge("HIGH") + fmt.Sprint(counts[audit.High]),
-		sevBadge("MEDIUM") + fmt.Sprint(counts[audit.Medium]),
-		sevBadge("LOW") + fmt.Sprint(counts[audit.Low]),
-		sevBadge("INFO") + fmt.Sprint(counts[audit.Info]),
-		"",
+		sevBadge("HIGH") + fmt.Sprint(counts[audit.High]) + "  " + sevBadge("MEDIUM") + fmt.Sprint(counts[audit.Medium]) + "  " + sevBadge("LOW") + fmt.Sprint(counts[audit.Low]) + "  " + sevBadge("INFO") + fmt.Sprint(counts[audit.Info]),
 	}
-	header := headerBoxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, lines...))
-
-	m.findingList.SetHeight(max(m.height-lipgloss.Height(header)-3, 5))
-	listView := m.findingList.View()
-
-	return lipgloss.JoinVertical(lipgloss.Left, header, listView)
+	return headerBoxStyle.Width(max(m.width-4, 1)).Render(strings.Join(lines, "\n"))
 }
-
-func (m model) renderDevicesTab() string {
-	m.deviceTable.SetHeight(max(m.height-4, 5))
+func (m model) devicesHeader() string {
 	header := detailLabelStyle.Render("Devices") + "  " + dimStyle.Render("s sort: "+m.deviceSortLabel())
-	return lipgloss.JoinVertical(lipgloss.Left, header, m.deviceTable.View())
+	if m.searchingDevices || m.deviceSearch.Value() != "" {
+		header += "\n" + m.deviceSearch.View()
+	}
+	if m.explainSource != nil {
+		header += "\nSource: " + m.explainSource.Hostname + " · select destination, Enter · Esc cancel"
+	}
+	return lipgloss.NewStyle().Width(max(m.width-2, 1)).Render(header)
 }
-
+func (m model) renderOverviewTab() string {
+	return lipgloss.JoinVertical(lipgloss.Left, m.overviewHeader(), m.findingList.View())
+}
+func (m model) renderDevicesTab() string {
+	return lipgloss.JoinVertical(lipgloss.Left, m.devicesHeader(), m.deviceTable.View())
+}
 func (m model) renderGraphTab() string {
-	header := detailLabelStyle.Render(fmt.Sprintf("Grant edges (%d)", len(m.edges))) +
-		"  " + dimStyle.Render("↑/↓ scroll")
-	m.graphView.Height = max(m.height-5, 5)
+	header := detailLabelStyle.Render(fmt.Sprintf("Grant edges (%d)", len(m.edges))) + "  " + dimStyle.Render("↑/↓ scroll")
 	return lipgloss.JoinVertical(lipgloss.Left, header, m.graphView.View())
 }
 
 func (m model) statusBar() string {
-	left := statusActiveTabStyle.Render(tabNames[m.activeTab])
-	mid := dimStyle.Render(fmt.Sprintf(" %d devices · %d users · %d findings ",
-		len(m.tailnet.Devices), len(m.tailnet.Users), len(m.findings)))
-	right := "1-3 tabs · ←→/tab switch · / filter findings · s sort devices · enter details · esc back · q quit"
-	pad := m.width - lipgloss.Width(left) - lipgloss.Width(mid) - lipgloss.Width(right)
-	if pad < 1 {
-		pad = 1
+	stamp := "unknown"
+	if !m.tailnet.CollectedAt.IsZero() {
+		stamp = m.tailnet.CollectedAt.Format("2006-01-02 15:04:05 MST")
 	}
-	return statusBarStyle.Render(left + mid + strings.Repeat(" ", pad) + right)
+	mode := "live"
+	if m.snapshot {
+		mode = "snapshot"
+	}
+	status := fmt.Sprintf("%s · %d devices · collected %s (%s)", tabNames[m.activeTab], len(m.tailnet.Devices), stamp, mode)
+	if m.message != "" {
+		status += "\n" + m.message
+	}
+	hints := "1–3 tabs · / search · s sort · e source · Enter details/destination · r refresh · q quit"
+	if m.width < 90 {
+		hints = "1–3 tabs · / search · s sort · e explain · r refresh · q quit"
+	}
+	return statusBarStyle.Width(max(m.width-2, 1)).Render(status + "\n" + hints)
+}
+
+func (m model) renderExplainInput() string {
+	lines := []string{
+		"Explain packet access", "",
+		m.explainSource.Hostname + " → " + m.explainTarget.Hostname,
+		"", m.explainPort.View(), m.explainProto.View(), "",
+		"Tab switches fields · Enter evaluates · Esc selects another destination",
+	}
+	if m.message != "" {
+		lines = append(lines, "", m.message)
+	}
+	return overlayBoxStyle.Width(max(m.width-4, 24)).Render(strings.Join(lines, "\n"))
+}
+func (m model) renderExplanation() string {
+	result := "POLICY DENIED"
+	if m.explainResult.Allowed {
+		result = "POLICY ALLOWED"
+	} else if m.explainResult.Indeterminate {
+		result = "CANNOT DETERMINE"
+	}
+	lines := []string{"Access explanation", m.explainSource.Hostname + " → " + m.explainTarget.Hostname + " " + m.explainProto.Value() + "/" + m.explainPort.Value(), "", result}
+	if m.explainResult.DefaultAllowed {
+		lines = append(lines, "No access rules are configured; the default policy permits access.")
+	}
+	for _, match := range m.explainResult.Matches {
+		lines = append(lines, "", "src: "+strings.Join(match.Grant.Sources, ", "), "dst: "+strings.Join(match.Grant.Destinations, ", "))
+		for _, chain := range match.Chain {
+			lines = append(lines, "  • "+chain)
+		}
+	}
+	if result == "POLICY DENIED" {
+		lines = append(lines, "No matching allow path for this device pair, protocol, and port.")
+	}
+	for _, u := range m.explainResult.Unsupported {
+		lines = append(lines, "", u.Selector+": "+u.Reason)
+	}
+	lines = append(lines, "", "Policy only: this does not test listeners or runtime connectivity.", "↑/↓ scroll · Esc back")
+	return lipgloss.NewStyle().Width(max(m.width-10, 20)).Render(strings.Join(lines, "\n"))
 }
 
 // renderFindingDetail shows the full finding as a full-screen overlay.
@@ -142,7 +192,7 @@ func (m model) renderDeviceDetail(d *tailnet.Device) string {
 		row("Online", boolLabel(d.Online)),
 		row("Authorized", boolLabel(d.Authorized)),
 		row("SSH enabled", boolLabel(d.SSHEnabled)),
-		row("Key expires", keyExpiryLong(d)),
+		row("Key expires", keyExpiryLongAt(d, m.referenceTime())),
 		row("Version", orDash(d.ClientVersion)),
 		"",
 		detailLabelStyle.Render("Routes"),
@@ -179,13 +229,14 @@ func routesBlock(d *tailnet.Device) string {
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
-func keyExpiryLong(d *tailnet.Device) string {
+func keyExpiryLong(d *tailnet.Device) string { return keyExpiryLongAt(d, time.Now()) }
+func keyExpiryLongAt(d *tailnet.Device, at time.Time) string {
 	switch {
 	case d.KeyExpiryDisabled:
 		return "disabled (key never expires)"
 	case d.Expires.IsZero():
 		return "-"
-	case time.Until(d.Expires) < 0:
+	case d.Expires.Sub(at) < 0:
 		return d.Expires.Format(time.RFC3339) + " (expired)"
 	default:
 		return d.Expires.Format(time.RFC3339)

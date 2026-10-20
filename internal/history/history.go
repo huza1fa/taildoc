@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"regexp"
 	"sort"
@@ -73,12 +74,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO runs (recorded_at)
-		SELECT DISTINCT recorded_at FROM findings`); err != nil {
-		db.Close()
-		return nil, err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_findings_fp ON findings(fingerprint)`); err != nil {
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_findings_fp_at ON findings(fingerprint, recorded_at)`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -86,13 +82,25 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	store := &Store{db: db}
+	if err := store.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 // Fingerprint returns the stable identity of a finding across runs.
-// Titles embed counts ("3 device(s) ...") so the leading count is stripped;
-// otherwise 2 -> 3 devices of the same issue would look like a new finding.
+// Built-in checks identify their rule and subject independently of evidence.
+// Older findings use the original evidence-based identity for compatibility.
 func Fingerprint(f audit.Finding) string {
+	if f.RuleID != "" && f.Subject != "" {
+		h := sha256.Sum256([]byte(f.RuleID + "\x00" + f.Subject))
+		return hex.EncodeToString(h[:])
+	}
+	return legacyFingerprint(f)
+}
+func legacyFingerprint(f audit.Finding) string {
 	evidence := append([]string(nil), f.Evidence...)
 	sort.Strings(evidence)
 	h := sha256.Sum256([]byte(string(f.Severity) + "\x00" + normalizeTitle(f.Title) + "\x00" + f.Detail + "\x00" + strings.Join(evidence, "\x00")))
@@ -118,20 +126,20 @@ func (s *Store) Record(findings []audit.Finding, at time.Time) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`INSERT INTO findings
-		(recorded_at, severity, title, detail, why, next, evidence, fingerprint)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		(recorded_at, severity, title, detail, why, next, evidence, fingerprint, rule_id, subject)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
 	defer stmt.Close()
 
-	ts := at.UTC().Format(time.RFC3339Nano)
+	ts := timeKey(at)
 	if _, err := tx.Exec(`INSERT INTO runs (recorded_at) VALUES (?)`, ts); err != nil {
 		return err
 	}
 	for _, f := range findings {
 		if _, err := stmt.Exec(ts, f.Severity, f.Title, f.Detail, f.Why, f.Next,
-			strings.Join(f.Evidence, "\n"), Fingerprint(f)); err != nil {
+			strings.Join(f.Evidence, "\n"), Fingerprint(f), f.RuleID, f.Subject); err != nil {
 			return err
 		}
 	}
@@ -188,10 +196,11 @@ func (s *Store) NewFindings(findings []audit.Finding) ([]audit.Finding, error) {
 	known := make(map[string]bool, len(prev))
 	for _, f := range prev {
 		known[Fingerprint(f)] = true
+		known[legacyFingerprint(f)] = true
 	}
 	var out []audit.Finding
 	for _, f := range findings {
-		if !known[Fingerprint(f)] {
+		if !known[Fingerprint(f)] && !known[legacyFingerprint(f)] {
 			out = append(out, f)
 		}
 	}
@@ -220,10 +229,10 @@ func (s *Store) Runs() ([]time.Time, error) {
 }
 
 func (s *Store) FindingsAt(at time.Time) ([]audit.Finding, error) {
-	rows, err := s.db.Query(`SELECT severity, title, detail, why, next, evidence
+	rows, err := s.db.Query(`SELECT severity, title, detail, why, next, evidence, rule_id, subject
 		FROM findings WHERE recorded_at = ?
 		ORDER BY CASE severity WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 WHEN 'LOW' THEN 2 ELSE 3 END, title, detail`,
-		at.UTC().Format(time.RFC3339Nano))
+		timeKey(at))
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +241,7 @@ func (s *Store) FindingsAt(at time.Time) ([]audit.Finding, error) {
 	for rows.Next() {
 		var f audit.Finding
 		var ev sql.NullString
-		if err := rows.Scan(&f.Severity, &f.Title, &f.Detail, &f.Why, &f.Next, &ev); err != nil {
+		if err := rows.Scan(&f.Severity, &f.Title, &f.Detail, &f.Why, &f.Next, &ev, &f.RuleID, &f.Subject); err != nil {
 			return nil, err
 		}
 		if ev.Valid && ev.String != "" {
@@ -247,4 +256,93 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func parseTime(ts string) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, ts)
+}
+
+// Fixed precision makes textual ordering correct even within the same second.
+func timeKey(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000000Z") }
+
+func (s *Store) migrate() error {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= 1 {
+		return nil
+	}
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO runs(recorded_at) SELECT DISTINCT recorded_at FROM findings`); err != nil {
+		return err
+	}
+	rows, err := s.db.Query(`PRAGMA table_info(findings)`)
+	if err != nil {
+		return err
+	}
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		columns[name] = true
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, col := range []string{"rule_id", "subject"} {
+		if !columns[col] {
+			if _, err := s.db.Exec(fmt.Sprintf("ALTER TABLE findings ADD COLUMN %s TEXT NOT NULL DEFAULT ''", col)); err != nil {
+				return err
+			}
+		}
+	}
+	rows, err = s.db.Query(`SELECT recorded_at FROM runs`)
+	if err != nil {
+		return err
+	}
+	var stamps []string
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			rows.Close()
+			return err
+		}
+		stamps = append(stamps, ts)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, ts := range stamps {
+		at, err := parseTime(ts)
+		if err != nil {
+			return err
+		}
+		key := timeKey(at)
+		if ts == key {
+			continue
+		}
+		if _, err = tx.Exec(`UPDATE findings SET recorded_at=? WHERE recorded_at=?`, key, ts); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO runs(recorded_at) VALUES (?)`, key); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM runs WHERE recorded_at=?`, ts); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`PRAGMA user_version=1`); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

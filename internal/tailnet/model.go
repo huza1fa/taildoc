@@ -4,6 +4,8 @@
 package tailnet
 
 import (
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -16,6 +18,7 @@ type Tailnet struct {
 	Devices           []*Device
 	Groups            map[string][]string // group name -> members (from policy file)
 	TagOwners         map[string][]string // tag name -> owners (from policy file)
+	IPSets            map[string][]string // named IP sets from policy
 	Hosts             map[string]string   // host alias -> IP
 	Grants            []*Grant            // normalized from grants + legacy ACLs
 	HasAccessRules    bool                // whether acls or grants were explicitly present
@@ -85,7 +88,8 @@ type Grant struct {
 	App          map[string][]map[string]any
 	SrcPosture   []string
 	Via          []string
-	Legacy       bool // true if converted from a legacy "acls" entry
+	Protocol     string // legacy ACL protocol; empty means TCP and UDP
+	Legacy       bool   // true if converted from a legacy "acls" entry
 }
 
 // AutoApprovers mirrors the policy file's autoApprovers section.
@@ -133,6 +137,9 @@ func (t *Tailnet) Sanitize() {
 	}
 	if t.Hosts == nil {
 		t.Hosts = map[string]string{}
+	}
+	if t.IPSets == nil {
+		t.IPSets = map[string][]string{}
 	}
 	if t.Postures == nil {
 		t.Postures = map[string][]string{}
@@ -210,4 +217,25 @@ func trimDNS(name string) string {
 		}
 	}
 	return name
+}
+
+// NetworkSummary distinguishes legacy destination ports from unrestricted
+// modern grants and app-only capabilities in every textual view.
+func (g *Grant) NetworkSummary() string {
+	if len(g.IP) > 0 {
+		ip := append([]string(nil), g.IP...)
+		sort.Strings(ip)
+		return strings.Join(ip, ", ")
+	}
+	if g.Legacy {
+		proto := g.Protocol
+		if proto == "" {
+			proto = "tcp/udp"
+		}
+		return proto + " (ports in destination)"
+	}
+	if len(g.App) > 0 {
+		return "(application capabilities only)"
+	}
+	return "(no network permissions)"
 }

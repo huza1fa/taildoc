@@ -12,7 +12,7 @@ import (
 )
 
 // runUI launches the interactive TUI. Data is collected up front (or loaded
-// from --snapshot); the TUI works over a static snapshot for v1.
+// from --snapshot); pressing r refreshes from the same source.
 func runUI(ctx context.Context, args []string) error {
 	fs := newFlagSet("ui")
 	snapshotPath := fs.String("snapshot", "", "load a saved snapshot JSON instead of collecting live")
@@ -35,7 +35,9 @@ func runUI(ctx context.Context, args []string) error {
 				*snapshotPath, t.CollectedAt.Format(time.RFC3339))
 		}
 	default:
-		t, err = collect(ctx)
+		initialCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		t, err = collect(initialCtx)
+		cancel()
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "taildoc ui: %v\n", err)
@@ -43,7 +45,11 @@ func runUI(ctx context.Context, args []string) error {
 		return err
 	}
 
-	return tui.Run(t)
+	refresh := collect
+	if *snapshotPath != "" {
+		refresh = func(context.Context) (*tailnet.Tailnet, error) { return snapshot.Load(*snapshotPath) }
+	}
+	return tui.Run(t, tui.Options{Context: ctx, Refresh: refresh, Snapshot: *snapshotPath != ""})
 }
 
 var colorEnabled = detectColor()

@@ -1,0 +1,75 @@
+{
+  "Name": "demo.ts.net",
+  "CollectedAt": "2026-10-19T12:00:00Z",
+  "HasAccessRules": true,
+  "Users": [
+    {
+      "ID": "u-alice",
+      "LoginName": "alice@example.com",
+      "DisplayName": "Alice",
+      "Role": "member",
+      "Type": "member",
+      "Status": "active"
+    },
+    {
+      "ID": "u-bob",
+      "LoginName": "bob@example.com",
+      "DisplayName": "Bob",
+      "Role": "owner",
+      "Type": "member",
+      "Status": "active"
+    }
+  ],
+  "Devices": [
+    {
+      "ID": "d-laptop",
+      "Hostname": "laptop",
+      "Name": "laptop.demo.ts.net",
+      "Owner": "alice@example.com",
+      "Addresses": [
+        "100.64.0.1"
+      ],
+      "OS": "linux",
+      "Online": true,
+      "Authorized": true,
+      "Expires": "2027-10-19T12:00:00Z"
+    },
+    {
+      "ID": "d-db",
+      "Hostname": "db-prod",
+      "Name": "db-prod.demo.ts.net",
+      "Tags": [
+        "tag:db"
+      ],
+      "Addresses": [
+        "100.64.0.2"
+      ],
+      "OS": "linux",
+      "Online": true,
+      "Authorized": true,
+      "KeyExpiryDisabled": true
+    }
+  ],
+  "Groups": {
+    "group:engineering": [
+      "alice@example.com"
+    ]
+  },
+  "TagOwners": {
+    "tag:db": [
+      "bob@example.com"
+    ]
+  },
+  "Grants": [
+    {
+      "Sources": [
+        "group:engineering"
+      ],
+      "Destinations": [
+        "tag:db:22"
+      ],
+      "Protocol": "tcp",
+      "Legacy": true
+    }
+  ]
+}

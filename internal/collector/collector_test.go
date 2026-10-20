@@ -2,8 +2,14 @@ package collector
 
 import (
 	"context"
+	"github.com/huza1fa/taildoc/internal/policy"
+	"github.com/huza1fa/taildoc/internal/tailnet"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"tailscale.com/client/tailscale/v2"
 	"testing"
 )
 
@@ -15,22 +21,6 @@ func TestNormalizeTag(t *testing.T) {
 	for _, c := range cases {
 		if got := normalizeTag(c.in); got != c.want {
 			t.Errorf("normalizeTag(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
-func TestNormalizeLegacyPort(t *testing.T) {
-	cases := []struct {
-		port, proto, want string
-	}{
-		{"5432", "", "tcp:5432"},
-		{"5432", "tcp", "tcp:5432"},
-		{"53", "udp", "udp:53"},
-		{"22", "icmp", "icmp:22"},
-	}
-	for _, c := range cases {
-		if got := normalizeLegacyPort(c.port, c.proto); got != c.want {
-			t.Errorf("normalizeLegacyPort(%q, %q) = %q, want %q", c.port, c.proto, got, c.want)
 		}
 	}
 }
@@ -54,5 +44,34 @@ func TestCollectUnauthenticatedHintsAuthLogin(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "auth login") {
 		t.Errorf("error should hint at `taildoc auth login`, got: %v", err)
+	}
+}
+
+func TestPolicyCollectionPreservesLegacyRestrictions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"acls":[{"action":"accept","src":["alice@example.com"],"dst":["tag:db:22,80-81"],"proto":"tcp"},{"action":"accept","users":["bob@example.com"],"ports":["tag:db:53"],"proto":"udp","srcPosture":["posture:trusted"]}],"ipsets":{"ipset:office":["100.64.0.0/24"]}}`))
+	}))
+	defer server.Close()
+	base, _ := url.Parse(server.URL)
+	tn := &tailnet.Tailnet{}
+	if err := collectPolicy(context.Background(), &tailscale.Client{BaseURL: base, Tailnet: "test"}, tn); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		port, proto string
+		want        bool
+	}{{"22", "tcp", true}, {"80", "tcp", true}, {"81", "tcp", true}, {"443", "tcp", false}, {"22", "udp", false}} {
+		got := policy.Evaluate(tn, policy.Request{SourceLogin: "alice@example.com", DestTags: []string{"tag:db"}, Port: tc.port, Proto: tc.proto})
+		if got.Allowed != tc.want {
+			t.Errorf("%s/%s: %+v", tc.proto, tc.port, got)
+		}
+	}
+	got := policy.Evaluate(tn, policy.Request{SourceLogin: "bob@example.com", DestTags: []string{"tag:db"}, Port: "53", Proto: "udp"})
+	if got.Allowed || !got.Indeterminate {
+		t.Fatalf("legacy posture lost: %+v", got)
+	}
+	if len(tn.IPSets["ipset:office"]) != 1 {
+		t.Fatal("IP sets lost")
 	}
 }

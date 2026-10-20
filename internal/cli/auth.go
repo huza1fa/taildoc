@@ -23,7 +23,7 @@ func runAuth(ctx context.Context, args []string) error {
   taildoc auth status  Show current credentials
   taildoc auth logout  Delete stored credentials
 `)
-		return errors.New("auth requires a subcommand: login, status, or logout")
+		return usageErrorf("auth requires a subcommand: login, status, or logout")
 	}
 
 	switch args[0] {
@@ -40,7 +40,7 @@ func runAuth(ctx context.Context, args []string) error {
 		}
 		return runAuthLogout()
 	default:
-		return fmt.Errorf("unknown auth subcommand %q (want login, status, or logout)", args[0])
+		return usageErrorf("unknown auth subcommand %q (want login, status, or logout)", args[0])
 	}
 }
 
@@ -54,7 +54,7 @@ func runAuthLogin(ctx context.Context, args []string) error {
 		return err
 	}
 	if fs.NArg() > 0 {
-		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+		return usageErrorf("unexpected argument %q", fs.Arg(0))
 	}
 
 	reader := bufio.NewReader(os.Stdin)
@@ -62,7 +62,7 @@ func runAuthLogin(ctx context.Context, args []string) error {
 	creds := &auth.Credentials{Tailnet: *tailnet}
 	switch {
 	case *apiKeyStdin && (*clientID != "" || *clientSecretStdin):
-		return errors.New("specify either --apikey-stdin or OAuth flags, not both")
+		return usageErrorf("specify either --apikey-stdin or OAuth flags, not both")
 	case *apiKeyStdin:
 		creds.Method = auth.MethodAPIKey
 		v, err := readSecretStdin()
@@ -72,7 +72,7 @@ func runAuthLogin(ctx context.Context, args []string) error {
 		creds.APIKey = v
 	case *clientID != "" || *clientSecretStdin:
 		if *clientID == "" || !*clientSecretStdin {
-			return errors.New("--oauth-client-id and --oauth-client-secret-stdin must be provided together")
+			return usageErrorf("--oauth-client-id and --oauth-client-secret-stdin must be provided together")
 		}
 		creds.Method = auth.MethodOAuth
 		creds.ClientID = *clientID

@@ -170,3 +170,25 @@ func TestRenderMarkdownEmpty(t *testing.T) {
 		t.Error("empty report missing title")
 	}
 }
+
+func TestSARIFIdentityIgnoresMutableEvidence(t *testing.T) {
+	a := Finding{RuleID: "stale-devices", Subject: "90-days", Title: "1 device(s) unseen", Severity: Medium, Evidence: []string{"old"}}
+	b := a
+	b.Title = "2 device(s) unseen"
+	b.Evidence = []string{"new", "other"}
+	fingerprint := func(f Finding) string {
+		t.Helper()
+		data, err := RenderSARIF([]Finding{f})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc sarifDoc
+		if err = json.Unmarshal(data, &doc); err != nil {
+			t.Fatal(err)
+		}
+		return doc.Runs[0].Results[0].PartialFingerprints["taildocFindingSha256"]
+	}
+	if fingerprint(a) != fingerprint(b) {
+		t.Fatal("SARIF identity changed with evidence")
+	}
+}

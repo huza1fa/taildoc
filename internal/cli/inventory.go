@@ -24,6 +24,9 @@ func runInventory(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: taildoc inventory [--snapshot FILE] [--output text|json]")
 	}
 
+	if *output != "text" && *output != "json" {
+		return usageErrorf("unknown --output %q (want text or json)", *output)
+	}
 	var t *tailnet.Tailnet
 	var err error
 	if *snapshotPath != "" {
@@ -52,7 +55,7 @@ func runInventory(ctx context.Context, args []string) error {
 		printRouters(t)
 		return nil
 	default:
-		return fmt.Errorf("unknown --output %q (want text or json)", *output)
+		return usageErrorf("unknown --output %q (want text or json)", *output)
 	}
 }
 

@@ -54,10 +54,10 @@ network-admin scope) or OAuth clients at
 | `audit` | Run checks; supports `--output text\|json\|sarif\|markdown`, `--fail-on`, and `--snapshot`. |
 | `explain <src> <dst[:port]>` | Trace the policy rule that allows or denies a connection. |
 | `find <query>` / `show <resource>` | Quickly locate a resource, then drill into its ownership, routes, and related policy. Both support `--snapshot FILE` before the argument. |
-| `snapshot` / `diff <old.json> [new.json]` | Save an inventory, then compare snapshots or one snapshot with live state. |
+| `snapshot` / `diff [--impact] <old.json> [new.json]` | Save an inventory, compare snapshots, and explain gained/lost/uncertain packet access. |
 | `graph` | Render grant relationships as Mermaid or DOT (`--format`, `--output`, `--snapshot`). |
-| `ui` | Browse findings, filter them, sort devices, and inspect grant relationships in a terminal dashboard. |
-| `history` | Store and review findings over time in SQLite (`--record`, `--db`). |
+| `ui` | Search and sort devices, explain access between selected devices, browse findings and grants, and refresh data. |
+| `history` | Track new, ongoing, resolved, and reopened findings in SQLite; filter by status, severity, check, or time. |
 | `doctor` / `watch` | Check local/API readiness without exposing credentials, or follow live inventory changes (`--interval`, `--once`). |
 | `completion <bash\|zsh\|fish>` | Generate shell completion. |
 | `auth login\|status\|logout` | Manage and verify local credentials. |
@@ -65,12 +65,89 @@ network-admin scope) or OAuth clients at
 Exit codes: `0` success, `1` error, `2` usage error, and `3` when findings meet
 the `audit --fail-on` threshold.
 
+## Policy explanations and access impact
+
+Legacy ACL destination ports, port lists/ranges, protocols, and source posture
+are retained during collection. The evaluator supports user/group selectors,
+tags, role selectors, IPs/CIDRs, host aliases, and named IP sets on either side.
+Unsupported selectors, posture conditions, and `via` constraints produce a
+`CANNOT DETERMINE` result when relevant. A separate certain allow path wins.
+App-only grants do not grant packet access. Tagged devices use their tags
+rather than inheriting their owner's user identity.
+
+```sh
+taildoc diff --impact before.json after.json
+taildoc diff --impact --source laptop --destination db-prod --port 5432 --proto tcp before.json after.json
+taildoc diff --impact --output json before.json after.json
+```
+
+Impact compares collected devices across TCP and UDP ports by default (SCTP is
+optional). It partitions ports at rule boundaries and combines adjacent changed
+ranges. Redundant rule changes do not appear as access changes. Uncertain paths
+are labeled separately from gained/lost access. Self-pairs, service endpoints,
+subnet destinations, and runtime connectivity are outside this comparison.
+A one-million-evaluation limit prevents unexpectedly expensive comparisons;
+use source/destination/port filters to narrow the scope.
+
+`explain` accepts concrete destination IPs and host aliases as well as device
+names. A tag destination evaluates the tag selector itself; specify a device
+name to include its IP addresses and other tags. Omitting the port or protocol
+asks whether any access is permitted, rather than whether all ports are open.
+Snapshots from older versions cannot recover policy fields that were never
+collected; collect a fresh snapshot for the most complete analysis.
+
+## Finding history
+
+```sh
+taildoc history --record
+taildoc history --limit 20 --status reopened
+taildoc history --severity high --check broad-grants --output json
+taildoc history --since 2026-10-01T00:00:00Z
+taildoc history --record --snapshot saved.json
+```
+
+Each run is compared with its predecessor. Findings are **new** on first
+appearance, **ongoing** while present, **resolved** when absent, and **reopened**
+when they return after resolution. Built-in checks use stable identities, so
+changing evidence or aggregate counts does not create a fresh issue. Aggregate
+findings track the check category; they are not individual device issue tickets.
+Existing databases are upgraded when opened. Older findings retain their legacy
+identity until a fresh run establishes the new identities.
+
+History shows the 10 most recent runs by default; `--limit 0` shows all. `--since`
+filters run timestamps, and status/severity/check filters apply within the
+selected runs. Classification still uses the actual predecessor even when it
+falls outside the display limit or time window. Display filters cannot be used
+with `--record`. Recording a snapshot audits it at its collection time and stores
+the run at the current recording time.
+
+## Terminal workflow and offline demo
+
+In `taildoc ui`, use `/` to search devices by name, IP, owner, OS, or tag and `s`
+to cycle sorting. Press `e` on a source device, select a destination, then press
+Enter to choose a port and protocol. Tab switches fields; Enter evaluates; Esc
+returns. Press `r` to refresh live data or reload the file passed to `--snapshot`.
+Failed refreshes keep the previous data. The status bar displays the collection
+timestamp, and snapshot expiry displays use that timestamp too.
+
+The synthetic examples let you try everything without API credentials:
+
+```sh
+go run ./cmd/taildoc explain --snapshot examples/demo-before.json laptop db-prod:443
+go run ./cmd/taildoc diff --impact examples/demo-before.json examples/demo-after.json
+go run ./cmd/taildoc ui --snapshot examples/demo-after.json
+
+go run ./cmd/taildoc history --db /tmp/taildoc-demo.db --record --snapshot examples/demo-before.json
+go run ./cmd/taildoc history --db /tmp/taildoc-demo.db --record --snapshot examples/demo-after.json
+go run ./cmd/taildoc history --db /tmp/taildoc-demo.db
+```
+
 ## CI
 
 Use JSON, Markdown, or SARIF for automation. A minimal GitHub Actions gate:
 
 ```yaml
-- run: go install github.com/huza1fa/taildoc/cmd/taildoc@v0.2.0
+- run: go install github.com/huza1fa/taildoc/cmd/taildoc@v1.3.0
 - name: Audit tailnet
   env:
     TS_ACCESS_TOKEN: ${{ secrets.TS_API_KEY }}

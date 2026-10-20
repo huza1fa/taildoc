@@ -22,10 +22,10 @@ type Edge struct {
 func Edges(t *tailnet.Tailnet) []Edge {
 	var out []Edge
 	for _, g := range t.Grants {
-		label := strings.Join(g.IP, ", ")
-		if label == "" {
-			label = "(all)"
+		if g == nil {
+			continue
 		}
+		label := g.NetworkSummary()
 		for _, src := range g.Sources {
 			for _, dst := range g.Destinations {
 				out = append(out, Edge{Src: src, Dst: dst, Label: label, Legacy: g.Legacy})

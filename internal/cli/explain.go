@@ -26,6 +26,9 @@ func runExplain(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: taildoc explain [--snapshot FILE] [--proto PROTO] [--json] <source> <destination[:port]>")
 	}
 
+	if *protoFlag != "" && !policy.ValidProtocol(*protoFlag) {
+		return usageErrorf("invalid protocol %q", *protoFlag)
+	}
 	var t *tailnet.Tailnet
 	var err error
 	if *snapshotPath != "" {
@@ -45,6 +48,9 @@ func runExplain(ctx context.Context, args []string) error {
 	}
 
 	dstHost, dstPort := splitDestPort(dstRef)
+	if dstPort != "" && dstPort != "*" && len(policy.PortRanges(dstPort)) == 0 {
+		return usageErrorf("invalid port %q", dstPort)
+	}
 	dstDev, dstTag := resolveDestination(t, dstHost)
 	if dstDev == nil && dstTag == "" {
 		return fmt.Errorf("cannot resolve destination %q: no device, tag, or host alias matches (try `taildoc inventory` to list names)", dstHost)
@@ -56,14 +62,14 @@ func runExplain(ctx context.Context, args []string) error {
 	result := policy.Evaluate(t, req)
 	if *jsonOut {
 		out := map[string]any{
-			"source":      srcRef,
-			"destination": dstHost,
-			"port":        dstPort,
-			"proto":       req.Proto,
-			"allowed":     result.Allowed,
+			"source":        srcRef,
+			"destination":   dstHost,
+			"port":          dstPort,
+			"proto":         req.Proto,
+			"allowed":       result.Allowed,
 			"indeterminate": result.Indeterminate,
-			"matches":     result.Matches,
-			"unsupported": result.Unsupported,
+			"matches":       result.Matches,
+			"unsupported":   result.Unsupported,
 		}
 		data, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
@@ -129,18 +135,20 @@ func isNumeric(s string) bool {
 // resolveDestination resolves a host reference to a device or a tag.
 func resolveDestination(t *tailnet.Tailnet, host string) (*tailnet.Device, string) {
 	if strings.HasPrefix(host, "tag:") {
-		devs := t.DevicesWithTag(host)
-		if len(devs) > 0 {
-			return devs[0], host
-		}
-		return nil, host // tag exists as a selector even without devices
+		return nil, host // evaluate the tag itself without choosing an arbitrary device
 	}
 	if d := t.FindDevice(host); d != nil {
 		return d, ""
 	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return &tailnet.Device{Hostname: host, Addresses: []string{host}}, ""
+	}
 	if ip, ok := t.Hosts[host]; ok {
 		if d := t.FindDevice(ip); d != nil {
 			return d, ""
+		}
+		if _, err := netip.ParseAddr(ip); err == nil {
+			return &tailnet.Device{Hostname: host, Addresses: []string{ip}}, ""
 		}
 	}
 	return nil, ""
@@ -152,7 +160,10 @@ func buildRequest(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.U
 	switch {
 	case srcDev != nil:
 		req.SourceTags = srcDev.Tags
-		req.SourceLogin = srcDev.Owner
+		req.SourceIPs = srcDev.Addresses
+		if len(srcDev.Tags) == 0 {
+			req.SourceLogin = srcDev.Owner
+		}
 	case srcUser != nil:
 		req.SourceLogin = srcUser.LoginName
 	}
@@ -160,13 +171,11 @@ func buildRequest(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.U
 	if dstDev != nil {
 		req.DestTags = dstDev.Tags
 		req.DestIPs = dstDev.Addresses
-		req.DestOwner = dstDev.Owner
-	} else if dstTag != "" {
-		for _, d := range t.DevicesWithTag(dstTag) {
-			req.DestIPs = append(req.DestIPs, d.Addresses...)
-			req.DestTags = append(req.DestTags, d.Tags...)
+		if len(dstDev.Tags) == 0 {
+			req.DestOwner = dstDev.Owner
 		}
-		req.DestTags = append(req.DestTags, dstTag)
+	} else if dstTag != "" {
+		req.DestTags = []string{dstTag}
 	}
 	return req
 }
@@ -202,7 +211,8 @@ func printExplain(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.U
 		}
 		fmt.Printf("  addresses: %s\n", strings.Join(dstDev.Addresses, ", "))
 	} else {
-		fmt.Printf("  %s (no devices currently carry this tag)\n", dstTag)
+		fmt.Printf("  %s (tag selector)\n", dstTag)
+		fmt.Println("  Use a device name to include its IP addresses and other tags in evaluation.")
 	}
 	fmt.Println()
 }
@@ -228,7 +238,7 @@ func printResult(result policy.Result, port string) {
 			fmt.Printf("  via %s:\n", kind)
 			fmt.Printf("    src: %s\n", strings.Join(g.Sources, ", "))
 			fmt.Printf("    dst: %s\n", strings.Join(g.Destinations, ", "))
-			fmt.Printf("    ip:  %s\n", orDefault(strings.Join(g.IP, ", "), "(all)"))
+			fmt.Printf("    ip:  %s\n", g.NetworkSummary())
 			for _, c := range m.Chain {
 				fmt.Printf("    - %s\n", c)
 			}

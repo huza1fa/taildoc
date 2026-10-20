@@ -73,7 +73,7 @@ func TestMermaidEdges(t *testing.T) {
 		if strings.Contains(l, "tcp:443") {
 			foundPort = true
 		}
-		if strings.Contains(l, "[legacy]") && strings.Contains(l, "(all)") {
+		if strings.Contains(l, "[legacy]") && strings.Contains(l, "ports in destination") {
 			foundLegacy = true
 		}
 	}
@@ -81,7 +81,7 @@ func TestMermaidEdges(t *testing.T) {
 		t.Errorf("expected an edge labeled tcp:443 in output:\n%s", out)
 	}
 	if !foundLegacy {
-		t.Errorf("expected a legacy edge labeled (all) [legacy] in output:\n%s", out)
+		t.Errorf("expected a legacy edge labeled with destination ports and [legacy] in output:\n%s", out)
 	}
 	if !strings.Contains(out, "linkStyle") {
 		t.Errorf("expected dashed linkStyle for legacy edges:\n%s", out)

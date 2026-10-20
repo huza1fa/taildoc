@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/huza1fa/taildoc/internal/collector"
@@ -24,6 +25,12 @@ func Run(args []string) int {
 		return 2
 	}
 
+	if len(args) == 2 && (args[1] == "--help" || args[1] == "-h") {
+		if help, ok := cmdHelp[args[0]]; ok {
+			fmt.Print(help)
+			return 0
+		}
+	}
 	baseCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	ctx, cancel := commandContext(baseCtx, args[0])
@@ -81,6 +88,13 @@ func Run(args []string) int {
 	}
 
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		if errors.Is(err, errUsage) || strings.HasPrefix(err.Error(), "usage:") {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 2
+		}
 		if errors.Is(err, ErrSeverityExceeded) {
 			fmt.Fprintln(os.Stderr, "error: findings met or exceeded --fail-on threshold")
 			return 3
@@ -97,7 +111,7 @@ func Run(args []string) int {
 // commandContext gives one-shot commands a bounded lifetime while allowing
 // watch to continue until the user interrupts it.
 func commandContext(base context.Context, command string) (context.Context, context.CancelFunc) {
-	if command == "watch" {
+	if command == "watch" || command == "ui" {
 		return base, func() {}
 	}
 	return context.WithTimeout(base, 60*time.Second)
@@ -120,13 +134,14 @@ Commands:
   find [--snapshot file] <query>      Search devices, users, tags, groups, and hosts
   show [--snapshot file] <resource>   Show a resource and its related policy
   snapshot [--output file]            Save a tailnet snapshot to JSON
-  diff <old.json> [new.json]          Diff two snapshots (second defaults to live)
+  diff [--impact] <old.json> [new.json]  Compare snapshots and optional access impact
    graph                               Render grant relationships
        --format mermaid|dot                Diagram format (default mermaid)
        --output file                       Write to file instead of stdout
        --snapshot file                     Render saved data instead of live data
-  history                             Findings over time
+  history                             Finding lifecycle over time
       --db path                           SQLite database (default taildoc.db)
+      --limit N --status STATUS           Limit runs; filter finding lifecycle
       --record                            Audit now and store results
   ui                                  Interactive terminal dashboard
       [--snapshot file]                   Browse a saved snapshot instead of live
@@ -159,7 +174,7 @@ Credentials are verified against the live API before being saved to
 ~/.config/taildoc/config.json (mode 0600). TS_ACCESS_TOKEN takes precedence
 over the stored config.
 `,
-  "inventory": `taildoc inventory — normalized view of users, devices, groups, grants, and routers
+	"inventory": `taildoc inventory — normalized view of users, devices, groups, grants, and routers
 
 Usage:
   taildoc inventory [--snapshot FILE] [--output text|json]
@@ -187,7 +202,10 @@ Usage:
   taildoc explain [--snapshot FILE] [--proto PROTO] [--json] <source> <destination[:port]>
 
 Source is a device hostname, IP, or user login. Destination may add a port,
-e.g. "db-prod:5432".
+e.g. "db-prod:5432". Concrete destination IPs and host aliases are supported.
+A tag destination evaluates that selector; use a device name to include its
+IP addresses and other tags. Omitted port/protocol asks if any path is allowed.
+Unsupported selectors, posture, and routing conditions report uncertainty.
 `,
 	"find": `taildoc find — quickly locate a tailnet resource
 
@@ -217,9 +235,14 @@ directory and prints its path.
 	"diff": `taildoc diff — compare two snapshots
 
 Usage:
-  taildoc diff <old.json> [new.json]
+  taildoc diff [--impact] [--output text|json] [--source DEVICE] [--destination DEVICE]
+             [--port PORT] [--proto tcp,udp,sctp] <old.json> [new.json]
 
 With one argument, compares the saved snapshot against live tailnet data.
+--impact reports gained, lost, or uncertain packet access for collected devices.
+The default scope covers TCP and UDP ports 0-65535, excluding self-pairs.
+Use --source, --destination, and --port to narrow larger comparisons.
+Impact is limited to 1,000,000 evaluations; it does not test runtime connectivity.
 `,
 	"graph": `taildoc graph — render grant relationships as a diagram
 
@@ -228,13 +251,19 @@ Usage:
 
 Mermaid output pastes directly into GitHub markdown; dot renders with Graphviz.
 `,
-	"history": `taildoc history — track findings over time
+	"history": `taildoc history — finding lifecycle over time
 
 Usage:
-  taildoc history [--db PATH] [--record]
+  taildoc history [--db PATH] [--record [--snapshot FILE]] [--output text|json]
+                  [--limit N] [--since RFC3339] [--status STATUS]
+                  [--severity high|medium|low|info] [--check NAME]
 
-  --record   Audit now, report which findings are new since first run, store.
-  --db       SQLite database path (default taildoc.db)
+--record audits and stores a run, with new/ongoing/resolved/reopened findings.
+--snapshot audits saved data with --record; otherwise collection is live.
+--limit defaults to the 10 most recent runs; 0 shows all runs.
+--status accepts new, ongoing, resolved, or reopened.
+--since filters run timestamps. Finding filters apply after the run limit.
+Display filters cannot be combined with --record.
 `,
 	"ui": `taildoc ui — interactive terminal dashboard
 
@@ -243,6 +272,11 @@ Usage:
 
 Tabs: overview with findings, device table, grant graph.
 Keys: 1-3/tab switch · enter details · esc close · q quit.
+Devices: / search by name, IP, owner, OS, or tag · s sort.
+Access: e chooses the selected device as source; select a destination and
+press Enter, enter port/protocol, then Enter to evaluate. Tab switches fields.
+r refreshes live data or reloads --snapshot; failed refreshes retain data.
+The status bar shows when the displayed data was collected.
 
 With --snapshot, browses a saved snapshot file instead of live data.
 `,
@@ -279,7 +313,22 @@ func collect(ctx context.Context) (*tailnet.Tailnet, error) {
 	return collector.Collect(ctx)
 }
 
-func newFlagSet(name string) *flag.FlagSet {
-	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	return fs
+var errUsage = errors.New("invalid command usage")
+
+type commandFlags struct{ *flag.FlagSet }
+
+func (f *commandFlags) Parse(args []string) error {
+	if err := f.FlagSet.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return err
+		}
+		return fmt.Errorf("%w: %v", errUsage, err)
+	}
+	return nil
+}
+func usageErrorf(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", errUsage, fmt.Sprintf(format, args...))
+}
+func newFlagSet(name string) *commandFlags {
+	return &commandFlags{flag.NewFlagSet(name, flag.ContinueOnError)}
 }

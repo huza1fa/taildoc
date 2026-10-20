@@ -31,9 +31,25 @@ func runAudit(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: taildoc audit [--output FORMAT] [--fail-on SEVERITY]")
 	}
 	if !validFailOn(*failOn) {
-		return fmt.Errorf("unknown --fail-on %q (want none, info, low, medium, or high)", *failOn)
+		return usageErrorf("unknown --fail-on %q (want none, info, low, medium, or high)", *failOn)
 	}
 
+	switch *output {
+	case "text", "json", "sarif", "markdown":
+	default:
+		return usageErrorf("unknown --output %q", *output)
+	}
+	for _, name := range append(splitCSV(*only), splitCSV(*exclude)...) {
+		found := false
+		for _, known := range audit.CheckNames {
+			if name == known {
+				found = true
+			}
+		}
+		if !found {
+			return usageErrorf("unknown audit check %q (see --list-checks)", name)
+		}
+	}
 	var (
 		t   *tailnet.Tailnet
 		err error
@@ -92,7 +108,7 @@ func runAudit(ctx context.Context, args []string) error {
 		}
 		fmt.Print(string(data))
 	default:
-		return fmt.Errorf("unknown --output %q (want text, json, sarif, or markdown)", *output)
+		return usageErrorf("unknown --output %q (want text, json, sarif, or markdown)", *output)
 	}
 
 	if exceedsFailOn(counts, *failOn) {

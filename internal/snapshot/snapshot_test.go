@@ -16,6 +16,7 @@ func fixture() *tailnet.Tailnet {
 	expires := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
 	return &tailnet.Tailnet{
 		Name:        "example.ts.net",
+		IPSets:      map[string][]string{"ipset:office": {"100.64.0.0/24"}},
 		CollectedAt: lastSeen,
 		Users: []*tailnet.User{
 			{

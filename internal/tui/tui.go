@@ -3,6 +3,7 @@
 package tui
 
 import (
+	"context"
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,13 +14,26 @@ import (
 )
 
 // Run launches the TUI with the given tailnet snapshot. The snapshot is
-// treated as static; there is no live refresh in v1 (restart the command
-// to re-collect).
-func Run(t *tailnet.Tailnet) error {
+// refreshed only when the user asks and a Refresh callback is supplied.
+type Options struct {
+	Context  context.Context
+	Refresh  func(context.Context) (*tailnet.Tailnet, error)
+	Snapshot bool
+}
+
+func Run(t *tailnet.Tailnet, options ...Options) error {
+	m := newModel(t)
+	if len(options) > 0 {
+		opts := options[0]
+		m.refresh, m.snapshot = opts.Refresh, opts.Snapshot
+		if opts.Context != nil {
+			m.ctx = opts.Context
+		}
+	}
 	if os.Getenv("NO_COLOR") != "" {
 		lipgloss.SetColorProfile(termenv.Ascii)
 	}
-	if _, err := tea.NewProgram(newModel(t), tea.WithAltScreen()).Run(); err != nil {
+	if _, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(m.ctx)).Run(); err != nil {
 		return err
 	}
 	return nil

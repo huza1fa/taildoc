@@ -24,7 +24,7 @@ func runWatch(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: taildoc watch [--interval DURATION] [--once]")
 	}
 	if *interval < minimumWatchInterval {
-		return fmt.Errorf("--interval must be at least %s", minimumWatchInterval)
+		return usageErrorf("--interval must be at least %s", minimumWatchInterval)
 	}
 	return watch(ctx, *interval, *once, collect, os.Stdout)
 }

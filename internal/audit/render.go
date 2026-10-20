@@ -50,6 +50,9 @@ func RenderSARIF(fs []Finding) ([]byte, error) {
 		evidence := append([]string(nil), f.Evidence...)
 		sort.Strings(evidence)
 		sum := sha256.Sum256([]byte(string(f.Severity) + "\x00" + f.Title + "\x00" + f.Detail + "\x00" + strings.Join(evidence, "\x00")))
+		if f.RuleID != "" && f.Subject != "" {
+			sum = sha256.Sum256([]byte(f.RuleID + "\x00" + f.Subject))
+		}
 		ruleSum := sha256.Sum256([]byte(f.Why + "\x00" + f.Next))
 		results = append(results, sarifResult{
 			RuleID: "TD-" + strings.ToUpper(hex.EncodeToString(ruleSum[:6])),

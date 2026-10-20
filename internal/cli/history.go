@@ -2,97 +2,109 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/huza1fa/taildoc/internal/audit"
 	"github.com/huza1fa/taildoc/internal/history"
+	"github.com/huza1fa/taildoc/internal/snapshot"
+	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 func runHistory(ctx context.Context, args []string) error {
 	fs := newFlagSet("history")
-	dbPath := fs.String("db", "taildoc.db", "path to the SQLite history database")
-	record := fs.Bool("record", false, "collect live data, run the audit, and record findings")
+	dbPath := fs.String("db", "taildoc.db", "SQLite history database")
+	record := fs.Bool("record", false, "audit and record findings")
+	snapshotPath := fs.String("snapshot", "", "record an audit of a saved snapshot")
+	limit := fs.Int("limit", 10, "maximum recent runs to show (0 for all)")
+	since := fs.String("since", "", "show runs since RFC3339 timestamp")
+	status := fs.String("status", "", "filter new, ongoing, resolved, or reopened")
+	severity := fs.String("severity", "", "filter high, medium, low, or info")
+	check := fs.String("check", "", "filter a named audit check")
+	output := fs.String("output", "text", "text or json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: taildoc history [--db PATH] [--record]")
+		return usageErrorf("usage: taildoc history [--record] [--db PATH] [--limit N] [--status STATUS]")
 	}
-
+	if *output != "text" && *output != "json" {
+		return usageErrorf("unknown history output %q", *output)
+	}
+	q := history.Query{Limit: *limit, Status: history.Status(*status), Severity: history.ParseSeverity(*severity), RuleID: *check}
+	if *since != "" {
+		at, err := time.Parse(time.RFC3339, *since)
+		if err != nil {
+			return usageErrorf("invalid --since: %v", err)
+		}
+		q.Since = at
+	}
+	if err := history.ValidateQuery(q); err != nil {
+		return usageErrorf("%v", err)
+	}
+	if *snapshotPath != "" && !*record {
+		return usageErrorf("--snapshot requires --record")
+	}
+	if *record && (*since != "" || *status != "" || *severity != "" || *check != "") {
+		return usageErrorf("history display filters cannot be used with --record")
+	}
 	store, err := history.Open(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-
 	if *record {
-		return historyRecord(ctx, store)
-	}
-	return historyShow(store)
-}
-
-func historyRecord(ctx context.Context, store *history.Store) error {
-	t, err := collect(ctx)
-	if err != nil {
-		return err
-	}
-
-	findings := audit.Run(t)
-	newFindings, err := store.NewFindings(findings)
-	if err != nil {
-		return err
-	}
-	if err := store.Record(findings, time.Now()); err != nil {
-		return err
-	}
-
-	counts := map[audit.Severity]int{}
-	for _, f := range findings {
-		counts[f.Severity]++
-	}
-
-	fmt.Printf("Recorded %d finding(s): %d high, %d medium, %d low, %d info\n",
-		len(findings), counts[audit.High], counts[audit.Medium], counts[audit.Low], counts[audit.Info])
-	fmt.Printf("New since first recorded run: %d\n", len(newFindings))
-	for _, f := range newFindings {
-		fmt.Printf("  NEW %s: %s\n", f.Severity, f.Title)
-	}
-	return nil
-}
-
-func historyShow(store *history.Store) error {
-	last, ok, err := store.LatestRun()
-	if err != nil {
-		return err
-	}
-	if !ok {
-		fmt.Println("No recorded runs yet. Run `taildoc history --record` to capture one.")
-		return nil
-	}
-
-	runs, err := store.Runs()
-	if err != nil {
-		return err
-	}
-
-	fmt.Printf("Last run: %s (%d run(s) recorded)\n", last.Format("2006-01-02 15:04:05 MST"), len(runs))
-
-	for _, at := range runs {
-		findings, err := store.FindingsAt(at)
+		var tn *tailnet.Tailnet
+		if *snapshotPath != "" {
+			tn, err = snapshot.Load(*snapshotPath)
+		} else {
+			tn, err = collect(ctx)
+		}
 		if err != nil {
 			return err
 		}
-		counts := map[audit.Severity]int{}
-		for _, f := range findings {
-			counts[f.Severity]++
+		at := time.Now()
+		findings := audit.Run(tn)
+		events, err := store.Preview(findings, at)
+		if err != nil {
+			return err
 		}
-		fmt.Printf("\n%s — %d finding(s) (%d high, %d medium, %d low, %d info)\n",
-			at.Format("2006-01-02 15:04:05 MST"), len(findings),
-			counts[audit.High], counts[audit.Medium], counts[audit.Low], counts[audit.Info])
-		for _, f := range findings {
-			fmt.Printf("  %s: %s\n", f.Severity, f.Title)
+		if err = store.Record(findings, at); err != nil {
+			return err
 		}
+		run := history.Run{At: at, Events: events}
+		if *output == "json" {
+			return json.NewEncoder(os.Stdout).Encode(run)
+		}
+		fmt.Printf("Recorded %d finding(s). Lifecycle compared with the previous run:\n", len(findings))
+		printHistoryRun(run)
+		return nil
+	}
+	runs, err := store.Timeline(q)
+	if err != nil {
+		return err
+	}
+	if *output == "json" {
+		return json.NewEncoder(os.Stdout).Encode(runs)
+	}
+	if len(runs) == 0 {
+		fmt.Println("No history matches. Use `taildoc history --record` to capture an audit.")
+		return nil
+	}
+	for _, r := range runs {
+		printHistoryRun(r)
 	}
 	return nil
+}
+func printHistoryRun(r history.Run) {
+	counts := map[history.Status]int{}
+	for _, e := range r.Events {
+		counts[e.Status]++
+	}
+	fmt.Printf("\n%s — %d new, %d ongoing, %d resolved, %d reopened\n", r.At.Format(time.RFC3339), counts[history.New], counts[history.Ongoing], counts[history.Resolved], counts[history.Reopened])
+	for _, e := range r.Events {
+		fmt.Printf("  %s %s: %s\n", e.Status, e.Finding.Severity, e.Finding.Title)
+	}
 }
