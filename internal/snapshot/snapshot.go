@@ -4,6 +4,7 @@ package snapshot
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -29,11 +30,33 @@ func Save(t *tailnet.Tailnet, path string) error {
 // drops nil/empty entries so corrupt files fail safe instead of panicking
 // downstream (diff/audit/policy/graph dereference these slices).
 func Load(path string) (*tailnet.Tailnet, error) {
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("read snapshot %s: %w", path, err)
 	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("snapshot %q must be a regular file", path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err = f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat snapshot %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("snapshot %q must be a regular file", path)
+	}
 	const maxSnapshotBytes = 32 << 20
+	if info.Size() > maxSnapshotBytes {
+		return nil, fmt.Errorf("parse snapshot %q: file too large (%d bytes, limit %d)", path, info.Size(), maxSnapshotBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxSnapshotBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot %s: %w", path, err)
+	}
 	if len(data) > maxSnapshotBytes {
 		return nil, fmt.Errorf("parse snapshot %s: file too large (%d bytes, limit %d)", path, len(data), maxSnapshotBytes)
 	}

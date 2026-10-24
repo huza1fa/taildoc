@@ -50,6 +50,8 @@ func Run(args []string) int {
 		err = runShow(ctx, args[1:])
 	case "diff":
 		err = runDiff(ctx, args[1:])
+	case "plan":
+		err = runPlan(ctx, args[1:])
 	case "snapshot":
 		err = runSnapshot(ctx, args[1:])
 	case "graph":
@@ -135,6 +137,7 @@ Commands:
   show [--snapshot file] <resource>   Show a resource and its related policy
   snapshot [--output file]            Save a tailnet snapshot to JSON
   diff [--impact] <old.json> [new.json]  Compare snapshots and optional access impact
+  plan --snapshot FILE --policy FILE  Preview a replacement policy offline
    graph                               Render grant relationships
        --format mermaid|dot                Diagram format (default mermaid)
        --output file                       Write to file instead of stdout
@@ -163,6 +166,28 @@ More help:
 }
 
 var cmdHelp = map[string]string{
+	"plan": `taildoc plan — preview a proposed replacement policy without applying it
+
+Usage:
+  taildoc plan --snapshot FILE --policy FILE [--output text|json]
+               [--source DEVICE] [--destination DEVICE] [--port PORT]
+               [--proto tcp,udp,sctp]
+
+Both files are required. The complete HuJSON policy replaces the snapshot's
+policy in memory; inventory, device tags, and route approvals remain unchanged.
+Shows policy differences and gained/lost/uncertain packet access between
+distinct collected devices. TCP and UDP are compared by default.
+
+Entirely offline: no credentials, API calls, file writes, or policy deployment.
+This is not Tailscale validation, a policy test runner, or a connectivity test.
+Unsupported selectors, posture, and via constraints remain unknown. SSH,
+application capabilities, service/subnet destinations, and runtime state are
+not evaluated. Unknown evaluations are counted even when unchanged.
+
+Policies are limited to 4 MiB and 128 nesting levels. Duplicate keys, nulls,
+unknown sections/rule fields, and malformed packet rules are rejected.
+Exit 0 means the preview completed, not that deploying the policy is safe.
+`,
 	"auth": `taildoc auth — connect to your tailnet
 
 Usage:

@@ -27,7 +27,7 @@ func runCompletion(args []string) error {
 const bashCompletion = `# taildoc shell completion for bash
 _taildoc() {
   local cur="${COMP_WORDS[COMP_CWORD]}" command="${COMP_WORDS[1]}"
-  local commands="auth inventory audit explain find show snapshot diff graph history ui doctor watch completion help version"
+  local commands="auth inventory audit explain find show snapshot diff plan graph history ui doctor watch completion help version"
   case "$command" in
     auth) COMPREPLY=( $(compgen -W "login status logout" -- "$cur") ) ;;
     completion) COMPREPLY=( $(compgen -W "bash zsh fish" -- "$cur") ) ;;
@@ -36,6 +36,7 @@ _taildoc() {
     graph) COMPREPLY=( $(compgen -W "--format --output --snapshot" -- "$cur") ) ;;
     history) COMPREPLY=( $(compgen -W "--db --record --snapshot --limit --since --status --severity --check --output" -- "$cur") ) ;;
     diff) COMPREPLY=( $(compgen -W "--impact --output --source --destination --port --proto" -- "$cur") ) ;;
+    plan) COMPREPLY=( $(compgen -W "--snapshot --policy --output --source --destination --port --proto" -- "$cur") ) ;;
     explain) COMPREPLY=( $(compgen -W "--snapshot --proto --json" -- "$cur") ) ;;
     inventory) COMPREPLY=( $(compgen -W "--snapshot --output" -- "$cur") ) ;;
     ui) COMPREPLY=( $(compgen -W "--snapshot" -- "$cur") ) ;;
@@ -59,6 +60,7 @@ _taildoc() {
     'show:show resource details'
     'snapshot:save a snapshot'
     'diff:compare snapshots'
+    'plan:preview a replacement policy offline'
     'graph:render grant relationships'
     'history:show finding history'
     'ui:open terminal dashboard'
@@ -79,6 +81,7 @@ _taildoc() {
     find|show|ui) _arguments '--snapshot[snapshot file]:file:_files' ;;
     graph) _arguments '--format[format]:format:(mermaid dot)' '--output[output file]:file:_files' '--snapshot[snapshot file]:file:_files' ;;
     diff) _arguments '--impact[compare effective access]' '--output[format]:format:(text json)' '--source[source device]:device:' '--destination[destination device]:device:' '--port[destination port]:port:' '--proto[protocols]:protocols:' '*:snapshot file:_files' ;;
+    plan) _arguments '--snapshot[baseline snapshot]:file:_files' '--policy[replacement HuJSON policy]:file:_files' '--output[format]:format:(text json)' '--source[source device]:device:' '--destination[destination device]:device:' '--port[destination port]:port:' '--proto[protocols]:protocols:' ;;
     explain) _arguments '--snapshot[snapshot file]:file:_files' '--proto[protocol]:protocol:(tcp udp sctp icmp)' '--json[JSON output]' ;;
     inventory) _arguments '--snapshot[snapshot file]:file:_files' '--output[format]:format:(text json)' ;;
     snapshot) _arguments '--output[output file]:file:_files' ;;
@@ -91,12 +94,13 @@ _taildoc "$@"`
 
 const fishCompletion = `# taildoc shell completion for fish
 complete -c taildoc -f
-complete -c taildoc -n '__fish_use_subcommand' -a 'auth inventory audit explain find show snapshot diff graph history ui doctor watch completion help version'
+complete -c taildoc -n '__fish_use_subcommand' -a 'auth inventory audit explain find show snapshot diff plan graph history ui doctor watch completion help version'
 complete -c taildoc -n '__fish_seen_subcommand_from auth' -a 'login status logout'
 complete -c taildoc -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 complete -c taildoc -n '__fish_seen_subcommand_from audit' -l output -a 'text json sarif markdown'
 complete -c taildoc -n '__fish_seen_subcommand_from audit' -l fail-on -a 'info low medium high'
-complete -c taildoc -n '__fish_seen_subcommand_from audit find show graph ui history inventory explain' -l snapshot -r
+complete -c taildoc -n '__fish_seen_subcommand_from audit find show graph ui history inventory explain plan' -l snapshot -r
+complete -c taildoc -n '__fish_seen_subcommand_from plan' -l policy -r
 complete -c taildoc -n '__fish_seen_subcommand_from graph' -l format -a 'mermaid dot'
 complete -c taildoc -n '__fish_seen_subcommand_from graph snapshot' -l output -r
 complete -c taildoc -n '__fish_seen_subcommand_from history' -l db -r
@@ -105,17 +109,17 @@ complete -c taildoc -n '__fish_seen_subcommand_from doctor' -l check-api
 complete -c taildoc -n '__fish_seen_subcommand_from doctor' -l collect
 complete -c taildoc -n '__fish_seen_subcommand_from watch' -l interval -r
 complete -c taildoc -n '__fish_seen_subcommand_from watch' -l once
-complete -c taildoc -n '__fish_seen_subcommand_from history diff inventory' -l output -a 'text json'
+complete -c taildoc -n '__fish_seen_subcommand_from history diff inventory plan' -l output -a 'text json'
 complete -c taildoc -n '__fish_seen_subcommand_from history' -l limit -r
 complete -c taildoc -n '__fish_seen_subcommand_from history' -l since -r
 complete -c taildoc -n '__fish_seen_subcommand_from history' -l status -a 'new ongoing resolved reopened'
 complete -c taildoc -n '__fish_seen_subcommand_from history' -l severity -a 'high medium low info'
 complete -c taildoc -n '__fish_seen_subcommand_from history' -l check -r
 complete -c taildoc -n '__fish_seen_subcommand_from diff' -l impact
-complete -c taildoc -n '__fish_seen_subcommand_from diff' -l source -r
-complete -c taildoc -n '__fish_seen_subcommand_from diff' -l destination -r
-complete -c taildoc -n '__fish_seen_subcommand_from diff' -l port -r
-complete -c taildoc -n '__fish_seen_subcommand_from diff explain' -l proto -r
+complete -c taildoc -n '__fish_seen_subcommand_from diff plan' -l source -r
+complete -c taildoc -n '__fish_seen_subcommand_from diff plan' -l destination -r
+complete -c taildoc -n '__fish_seen_subcommand_from diff plan' -l port -r
+complete -c taildoc -n '__fish_seen_subcommand_from diff explain plan' -l proto -r
 complete -c taildoc -n '__fish_seen_subcommand_from explain' -l json
 complete -c taildoc -n '__fish_seen_subcommand_from audit' -l only -r
 complete -c taildoc -n '__fish_seen_subcommand_from audit' -l exclude -r

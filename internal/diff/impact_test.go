@@ -67,3 +67,11 @@ func TestImpactBudgetCancellationAndAbsentDevices(t *testing.T) {
 		t.Fatalf("new devices: %+v %v", r, err)
 	}
 }
+
+func TestImpactRejectsDuplicateDeviceIdentity(t *testing.T) {
+	tn := impactFixture()
+	tn.Devices = append(tn.Devices, tn.Devices[0])
+	if _, err := AccessImpact(context.Background(), tn, impactFixture(), ImpactOptions{}); err == nil {
+		t.Fatal("duplicate identities would silently drop devices from the comparison")
+	}
+}

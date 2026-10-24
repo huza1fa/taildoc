@@ -29,13 +29,17 @@ type AccessChange struct {
 	After       string `json:"after"`
 }
 type ImpactReport struct {
-	Scope       string         `json:"scope"`
-	Evaluations int            `json:"evaluations"`
-	Changes     []AccessChange `json:"changes"`
+	Scope              string         `json:"scope"`
+	Evaluations        int            `json:"evaluations"`
+	UnknownEvaluations int            `json:"unknown_evaluations"`
+	Changes            []AccessChange `json:"changes"`
 }
 
 func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactOptions) (ImpactReport, error) {
 	report := ImpactReport{Scope: "Collected device pairs; packet policy only, excluding service, subnet destination, and runtime connectivity analysis.", Changes: []AccessChange{}}
+	if err := ctx.Err(); err != nil {
+		return report, err
+	}
 	if oldT == nil || newT == nil {
 		return report, fmt.Errorf("access impact requires two snapshots")
 	}
@@ -67,7 +71,14 @@ func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactO
 		}
 		intervals = ranges
 	}
-	oldIdx, newIdx := deviceIndex(oldT), deviceIndex(newT)
+	oldIdx, err := deviceIndex(oldT)
+	if err != nil {
+		return report, err
+	}
+	newIdx, err := deviceIndex(newT)
+	if err != nil {
+		return report, err
+	}
 	keys := map[string]bool{}
 	for k := range oldIdx {
 		keys[k] = true
@@ -156,6 +167,12 @@ func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactO
 					before := accessState(oldT, oldIdx[s], oldIdx[d], r[0], proto)
 					after := accessState(newT, newIdx[s], newIdx[d], r[0], proto)
 					report.Evaluations += 2
+					if before == "unknown" {
+						report.UnknownEvaluations++
+					}
+					if after == "unknown" {
+						report.UnknownEvaluations++
+					}
 					if before == after {
 						last = -1
 						continue
@@ -189,14 +206,18 @@ func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactO
 	}
 	return report, nil
 }
-func deviceIndex(t *tailnet.Tailnet) map[string]*tailnet.Device {
+func deviceIndex(t *tailnet.Tailnet) (map[string]*tailnet.Device, error) {
 	idx := map[string]*tailnet.Device{}
 	for _, d := range t.Devices {
 		if d != nil {
-			idx[deviceKey(d)] = d
+			key := deviceKey(d)
+			if _, exists := idx[key]; exists {
+				return nil, fmt.Errorf("duplicate device identity %q in snapshot; cannot compare access reliably", key)
+			}
+			idx[key] = d
 		}
 	}
-	return idx
+	return idx, nil
 }
 func accessState(t *tailnet.Tailnet, src, dst *tailnet.Device, port int, proto string) string {
 	if src == nil || dst == nil {

@@ -6,12 +6,12 @@ package collector
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"tailscale.com/client/tailscale/v2"
 
 	"github.com/huza1fa/taildoc/internal/auth"
+	"github.com/huza1fa/taildoc/internal/policy"
 	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
@@ -120,74 +120,6 @@ func collectPolicy(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet)
 		return fmt.Errorf("reading policy file (token may lack policy read scope or admin role): %w", err)
 	}
 
-	normalizePolicy(acl, t)
+	policy.Normalize(t, acl)
 	return nil
-}
-
-// normalizePolicy retains selector and legacy ACL semantics without losing
-// destination-specific ports, protocols, or posture requirements.
-func normalizePolicy(acl *tailscale.ACL, t *tailnet.Tailnet) {
-	t.Sanitize()
-	t.Grants = nil
-	for name, ranges := range acl.IPSets {
-		t.IPSets[name] = ranges
-	}
-
-	for g, members := range acl.Groups {
-		t.Groups[g] = members
-	}
-	for tag, owners := range acl.TagOwners {
-		t.TagOwners[normalizeTag(tag)] = owners
-	}
-	for h, ip := range acl.Hosts {
-		t.Hosts[h] = ip
-	}
-	for p, conds := range acl.Postures {
-		t.Postures[p] = conds
-	}
-	if acl.AutoApprovers != nil {
-		t.AutoApprovers = tailnet.AutoApprovers{
-			Routes:   acl.AutoApprovers.Routes,
-			ExitNode: acl.AutoApprovers.ExitNode,
-			Services: acl.AutoApprovers.Services,
-		}
-	}
-	t.HasAccessRules = acl.ACLs != nil || acl.Grants != nil
-	t.DefaultSrcPosture = acl.DefaultSourcePosture
-
-	// Modern grants.
-	for _, g := range acl.Grants {
-		t.Grants = append(t.Grants, &tailnet.Grant{
-			Sources:      g.Source,
-			Destinations: g.Destination,
-			IP:           g.IP,
-			App:          g.App,
-			SrcPosture:   g.SrcPosture,
-			Via:          g.Via,
-		})
-	}
-
-	for _, e := range acl.ACLs {
-		if !strings.EqualFold(e.Action, "accept") {
-			continue
-		}
-		sources, destinations := e.Source, e.Destination
-		if sources == nil {
-			sources = e.Users
-		}
-		if destinations == nil {
-			destinations = e.Ports
-		}
-		t.Grants = append(t.Grants, &tailnet.Grant{
-			Sources: sources, Destinations: destinations,
-			Protocol: e.Protocol, SrcPosture: e.SourcePosture, Legacy: true,
-		})
-	}
-}
-
-func normalizeTag(tag string) string {
-	if !strings.Contains(tag, ":") {
-		return "tag:" + tag
-	}
-	return tag
 }

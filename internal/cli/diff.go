@@ -30,17 +30,12 @@ func runDiff(ctx context.Context, args []string) error {
 	if !*impact && (*source != "" || *destination != "" || *port != "" || *proto != "tcp,udp") {
 		return usageErrorf("--source, --destination, --port, and --proto require --impact")
 	}
+	var opts diff.ImpactOptions
 	if *impact {
-		if *port != "" {
-			ranges := policy.PortRanges(*port)
-			if len(ranges) != 1 || ranges[0][0] != ranges[0][1] {
-				return usageErrorf("impact port must be a number from 0 to 65535")
-			}
-		}
-		for _, p := range strings.Split(*proto, ",") {
-			if p != "tcp" && p != "udp" && p != "sctp" {
-				return usageErrorf("impact protocol must be tcp, udp, or sctp")
-			}
+		var err error
+		opts, err = impactOptions(*source, *destination, *port, *proto)
+		if err != nil {
+			return err
 		}
 	}
 	rest := fs.Args()
@@ -69,7 +64,7 @@ func runDiff(ctx context.Context, args []string) error {
 	}
 	var report *diff.ImpactReport
 	if *impact {
-		result, err := diff.AccessImpact(ctx, oldT, newT, diff.ImpactOptions{Source: *source, Destination: *destination, Port: *port, Protocols: strings.Split(*proto, ",")})
+		result, err := diff.AccessImpact(ctx, oldT, newT, opts)
 		if err != nil {
 			return err
 		}
@@ -83,15 +78,38 @@ func runDiff(ctx context.Context, args []string) error {
 	}
 	printChanges(changes)
 	if report != nil {
-		fmt.Printf("\nAccess impact (%d evaluations)\n%s\n", report.Evaluations, report.Scope)
-		for _, c := range report.Changes {
-			fmt.Printf("  %s: %s -> %s %s/%s (%s -> %s)\n", c.Kind, c.Source, c.Destination, c.Protocol, c.Ports, c.Before, c.After)
-		}
-		if len(report.Changes) == 0 {
-			fmt.Println("No access changes in the selected scope.")
-		}
+		printImpact(*report)
 	}
 	return nil
+}
+
+func impactOptions(source, destination, port, proto string) (diff.ImpactOptions, error) {
+	if port != "" {
+		ranges := policy.PortRanges(port)
+		if len(ranges) != 1 || ranges[0][0] != ranges[0][1] {
+			return diff.ImpactOptions{}, usageErrorf("impact port must be a number from 0 to 65535")
+		}
+	}
+	protocols := strings.Split(proto, ",")
+	for _, p := range protocols {
+		if p != "tcp" && p != "udp" && p != "sctp" {
+			return diff.ImpactOptions{}, usageErrorf("impact protocol must be tcp, udp, or sctp")
+		}
+	}
+	return diff.ImpactOptions{Source: source, Destination: destination, Port: port, Protocols: protocols}, nil
+}
+
+func printImpact(report diff.ImpactReport) {
+	fmt.Printf("\nAccess impact (%d evaluations, %d unknown)\n%s\n", report.Evaluations, report.UnknownEvaluations, report.Scope)
+	for _, c := range report.Changes {
+		fmt.Printf("  %s: %s -> %s %s/%s (%s -> %s)\n", c.Kind, terminalText(c.Source), terminalText(c.Destination), c.Protocol, c.Ports, c.Before, c.After)
+	}
+	if len(report.Changes) == 0 {
+		fmt.Println("No access changes detected in the selected scope.")
+	}
+	if report.UnknownEvaluations > 0 {
+		fmt.Println("Some paths could not be determined, including any unchanged unknown paths; this is not a complete safety assessment.")
+	}
 }
 
 func printChanges(changes []diff.Change) {

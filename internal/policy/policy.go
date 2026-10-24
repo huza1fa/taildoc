@@ -445,7 +445,14 @@ func splitDst(dst string) (host, port string, ok bool) {
 	if i < 0 {
 		return dst, "*", dst != ""
 	}
-	if p := dst[i+1:]; len(PortRanges(p)) > 0 {
+	if strings.Count(dst, ":") == 1 {
+		switch dst[:i] {
+		case "tag", "group", "autogroup", "ipset", "svc":
+			// A numeric selector name (tag:22) is not a destination port.
+			return dst, "*", true
+		}
+	}
+	if p := dst[i+1:]; p != "" && (p[0] == '*' || (p[0] >= '0' && p[0] <= '9')) && len(PortRanges(p)) > 0 {
 		return dst[:i], p, true
 	}
 	// A namespace separator is not a port separator.
@@ -466,8 +473,21 @@ func ipMatches(selector, ip string) bool {
 	return err == nil && sel == addr
 }
 func looksLikeIPOrCIDR(s string) bool {
-	if _, err := netip.ParsePrefix(s); err == nil {
-		return true
+	// Most destinations are symbolic selectors. Avoid constructing netip parse
+	// errors for their namespace prefixes on every device/port evaluation.
+	if colon := strings.IndexByte(s, ':'); colon >= 0 {
+		for i := 0; i < colon; i++ {
+			c := s[i]
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	} else if !strings.Contains(s, ".") {
+		return false
+	}
+	if strings.Contains(s, "/") {
+		_, err := netip.ParsePrefix(s)
+		return err == nil
 	}
 	_, err := netip.ParseAddr(s)
 	return err == nil

@@ -19,8 +19,10 @@ func TestNormalizeTag(t *testing.T) {
 		{"tag:prod", "tag:prod"},
 	}
 	for _, c := range cases {
-		if got := normalizeTag(c.in); got != c.want {
-			t.Errorf("normalizeTag(%q) = %q, want %q", c.in, got, c.want)
+		tn := &tailnet.Tailnet{}
+		policy.Normalize(tn, &tailscale.ACL{TagOwners: map[string][]string{c.in: {"alice@example.com"}}})
+		if _, ok := tn.TagOwners[c.want]; !ok {
+			t.Errorf("normalizing %q did not produce %q", c.in, c.want)
 		}
 	}
 }

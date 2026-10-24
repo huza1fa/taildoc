@@ -55,6 +55,7 @@ network-admin scope) or OAuth clients at
 | `explain <src> <dst[:port]>` | Trace the policy rule that allows or denies a connection. |
 | `find <query>` / `show <resource>` | Quickly locate a resource, then drill into its ownership, routes, and related policy. Both support `--snapshot FILE` before the argument. |
 | `snapshot` / `diff [--impact] <old.json> [new.json]` | Save an inventory, compare snapshots, and explain gained/lost/uncertain packet access. |
+| `plan --snapshot FILE --policy FILE` | Preview a complete replacement HuJSON policy offline, showing policy differences and gained/lost/uncertain device access without applying anything. |
 | `graph` | Render grant relationships as Mermaid or DOT (`--format`, `--output`, `--snapshot`). |
 | `ui` | Search and sort devices, explain access between selected devices, browse findings and grants, and refresh data. |
 | `history` | Track new, ongoing, resolved, and reopened findings in SQLite; filter by status, severity, check, or time. |
@@ -96,6 +97,44 @@ asks whether any access is permitted, rather than whether all ports are open.
 Snapshots from older versions cannot recover policy fields that were never
 collected; collect a fresh snapshot for the most complete analysis.
 
+## Preview policy changes before applying them
+
+```sh
+taildoc plan --snapshot current.json --policy proposed.hujson
+taildoc plan --snapshot current.json --policy proposed.hujson --source laptop --destination db-prod --port 5432 --proto tcp
+taildoc plan --snapshot current.json --policy proposed.hujson --output json
+```
+
+Both files are required. `plan` replaces **all policy sections** in memory, not
+just grants, while keeping the snapshot's users, devices, tags, and enabled
+routes fixed. A removed group or host alias is not inherited from the baseline.
+Changes to tag owners and auto approvers do not simulate re-tagging or route
+approval. The original files are never modified; no credentials or API calls
+are needed, and the proposed policy is never sent anywhere.
+
+Output includes the baseline collection time, normalized policy differences,
+and access gained, lost, or made uncertain. TCP and UDP are compared by default;
+`--proto` also accepts SCTP. Filters and the one-million-evaluation limit match
+`diff --impact`. Older snapshots can lack policy information; use a recent,
+trusted snapshot. Only distinct collected device pairs are compared, not future
+devices, subnet/service destinations, SSH authorization, application capabilities,
+or runtime connectivity. Posture, `via`, and unsupported selectors remain
+unknown. Unknown evaluations are counted **even when unchanged**; no detected
+changes is not proof that a policy is safe.
+
+The loader accepts HuJSON comments and trailing commas, with a 4 MiB input limit
+and a 128-level nesting limit. It rejects duplicate keys, null values, unknown
+sections or packet-rule fields, and malformed packet-rule shapes rather than
+silently discarding possible restrictions. Known out-of-scope sections such as
+`ssh`, `tests`, `sshTests`, and `nodeAttrs` produce warnings and are not evaluated
+or validated. Omitting both `acls` and `grants` uses the local evaluator's default
+allow-all behavior and produces a warning; explicit empty rule arrays deny all.
+
+**This is an offline estimate, not authoritative Tailscale policy validation or
+a policy test runner.** Exit `0` means the preview completed, not that deployment
+is safe. Continue using [Tailscale's validation and policy tests](https://tailscale.com/kb/1306/gitops-acls-github)
+before deploying a policy.
+
 ## Finding history
 
 ```sh
@@ -135,6 +174,7 @@ The synthetic examples let you try everything without API credentials:
 ```sh
 go run ./cmd/taildoc explain --snapshot examples/demo-before.json laptop db-prod:443
 go run ./cmd/taildoc diff --impact examples/demo-before.json examples/demo-after.json
+go run ./cmd/taildoc plan --snapshot examples/demo-before.json --policy examples/demo-policy.hujson
 go run ./cmd/taildoc ui --snapshot examples/demo-after.json
 
 go run ./cmd/taildoc history --db /tmp/taildoc-demo.db --record --snapshot examples/demo-before.json
@@ -174,7 +214,7 @@ go vet ./...
 
 The implementation lives under `internal/`: `collector` builds a normalized
 model, `policy` powers `explain`, `audit` renders findings, and `snapshot`,
-`diff`, `graph`, and `history` provide the corresponding workflows. `cmd/taildoc`
+`diff`, `plan`, `graph`, and `history` provide the corresponding workflows. `cmd/taildoc`
 is the binary entry point.
 
 ## License

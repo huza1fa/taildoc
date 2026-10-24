@@ -1,0 +1,17 @@
+{
+  // Complete replacement policy for demo-before.json: retain SSH packet
+  // access and add PostgreSQL access from engineering laptops to the DB.
+  "groups": {
+    "group:engineering": ["alice@example.com"],
+  },
+  "tagOwners": {
+    "tag:db": ["bob@example.com"],
+  },
+  "grants": [
+    {
+      "src": ["group:engineering"],
+      "dst": ["tag:db"],
+      "ip": ["tcp:22", "tcp:5432"],
+    },
+  ],
+}

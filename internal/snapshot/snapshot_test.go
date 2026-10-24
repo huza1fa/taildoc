@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,5 +206,25 @@ func TestLoadErrorsOnBadFile(t *testing.T) {
 	os.WriteFile(bad, []byte("{not json"), 0o644)
 	if _, err := Load(bad); err == nil {
 		t.Fatal("expected error loading invalid JSON")
+	}
+}
+
+func TestLoadBoundsReadingAndRejectsDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := Load(dir); err == nil {
+		t.Fatal("accepted a directory")
+	}
+	path := filepath.Join(dir, "large.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = f.Truncate((32 << 20) + 1)
+	f.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "file too large") {
+		t.Fatalf("missing snapshot size bound: %v", err)
 	}
 }
