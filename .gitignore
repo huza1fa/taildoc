@@ -29,8 +29,14 @@ go.work.sum
 
 # Taildoc data exports contain tailnet topology and policy information.
 taildoc-snapshot-*.json
+*.snapshot.json
+before.json
+after.json
+current.json
 taildoc.db
 taildoc.db-*
+history.db
+history.db-*
 
 # Editor/IDE
 # .idea/

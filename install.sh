@@ -25,6 +25,11 @@ case "$arch" in
         ;;
 esac
 
+if ! command -v cosign >/dev/null 2>&1; then
+    echo "error: cosign is required to verify this release; install it from https://docs.sigstore.dev/cosign/system_config/installation/" >&2
+    exit 1
+fi
+
 # Resolve the latest release tag by following GitHub's /releases/latest redirect.
 tag_url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$REPO/releases/latest")"
 tag="${tag_url##*/}"
@@ -46,10 +51,6 @@ curl -fsSLo "$tmp/checksums.txt" "$checksums_url"
 curl -fsSLo "$tmp/checksums.txt.sig" "$signature_url"
 curl -fsSLo "$tmp/checksums.txt.pem" "$certificate_url"
 
-if ! command -v cosign >/dev/null 2>&1; then
-    echo "error: cosign is required to verify this release; install it from https://docs.sigstore.dev/cosign/system_config/installation/" >&2
-    exit 1
-fi
 cosign verify-blob \
     --certificate "$tmp/checksums.txt.pem" \
     --signature "$tmp/checksums.txt.sig" \
