@@ -15,7 +15,7 @@ import (
 
 func runHistory(ctx context.Context, args []string) error {
 	fs := newFlagSet("history")
-	dbPath := fs.String("db", "taildoc.db", "SQLite history database")
+	dbPath := fs.String("db", "", "SQLite history database (default: history.db in the taildoc config directory)")
 	record := fs.Bool("record", false, "audit and record findings")
 	snapshotPath := fs.String("snapshot", "", "record an audit of a saved snapshot")
 	limit := fs.Int("limit", 10, "maximum recent runs to show (0 for all)")
@@ -24,6 +24,7 @@ func runHistory(ctx context.Context, args []string) error {
 	severity := fs.String("severity", "", "filter high, medium, low, or info")
 	check := fs.String("check", "", "filter a named audit check")
 	output := fs.String("output", "text", "text or json")
+	prune := fs.Int("prune", -1, "keep only the newest N runs")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -33,13 +34,12 @@ func runHistory(ctx context.Context, args []string) error {
 	if *output != "text" && *output != "json" {
 		return usageErrorf("unknown history output %q", *output)
 	}
+	var err error
 	q := history.Query{Limit: *limit, Status: history.Status(*status), Severity: history.ParseSeverity(*severity), RuleID: *check}
 	if *since != "" {
-		at, err := time.Parse(time.RFC3339, *since)
-		if err != nil {
+		if q.Since, err = time.Parse(time.RFC3339, *since); err != nil {
 			return usageErrorf("invalid --since: %v", err)
 		}
-		q.Since = at
 	}
 	if err := history.ValidateQuery(q); err != nil {
 		return usageErrorf("%v", err)
@@ -50,11 +50,30 @@ func runHistory(ctx context.Context, args []string) error {
 	if *record && (*since != "" || *status != "" || *severity != "" || *check != "") {
 		return usageErrorf("history display filters cannot be used with --record")
 	}
+	if *prune != -1 && *prune < 1 {
+		return usageErrorf("--prune must keep at least 1 run")
+	}
+	if *dbPath == "" {
+		if *dbPath, err = history.DefaultPath(); err != nil {
+			return err
+		}
+	}
 	store, err := history.Open(*dbPath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	pruneRuns := func() error {
+		if *prune == -1 {
+			return nil
+		}
+		removed, err := store.Prune(*prune)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "Pruned %d run(s).\n", removed)
+		return nil
+	}
 	if *record {
 		var tn *tailnet.Tailnet
 		if *snapshotPath != "" {
@@ -76,11 +95,17 @@ func runHistory(ctx context.Context, args []string) error {
 		}
 		run := history.Run{At: at, Events: events}
 		if *output == "json" {
-			return json.NewEncoder(os.Stdout).Encode(run)
+			if err := json.NewEncoder(os.Stdout).Encode(run); err != nil {
+				return err
+			}
+			return pruneRuns()
 		}
 		fmt.Printf("Recorded %d finding(s). Lifecycle compared with the previous run:\n", len(findings))
 		printHistoryRun(run)
-		return nil
+		return pruneRuns()
+	}
+	if *prune != -1 {
+		return pruneRuns()
 	}
 	runs, err := store.Timeline(q)
 	if err != nil {

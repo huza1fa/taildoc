@@ -1,6 +1,7 @@
 package history
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -164,4 +165,58 @@ func TestRunsOrdering(t *testing.T) {
 	if len(runs) != 2 || !runs[0].Equal(a) || !runs[1].Equal(b) {
 		t.Fatalf("got runs %v, want [%v %v]", runs, a, b)
 	}
+}
+
+func TestPruneKeepsNewestRuns(t *testing.T) {
+	store, err := Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	finding := audit.Finding{RuleID: "stale-devices", Subject: "x", Severity: audit.Low, Title: "t"}
+	for i := 0; i < 5; i++ {
+		if err := store.Record([]audit.Finding{finding}, base.Add(time.Duration(i)*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := store.Prune(2)
+	if err != nil || removed != 3 {
+		t.Fatalf("Prune(2) = %d, %v", removed, err)
+	}
+	runs, err := store.Runs()
+	if err != nil || len(runs) != 2 || !runs[0].Equal(base.Add(3*time.Hour)) {
+		t.Fatalf("runs = %v, %v", runs, err)
+	}
+	if old, err := store.FindingsAt(base); err != nil || len(old) != 0 {
+		t.Fatalf("findings of pruned run = %v, %v", old, err)
+	}
+	if kept, err := store.FindingsAt(base.Add(4 * time.Hour)); err != nil || len(kept) != 1 {
+		t.Fatalf("findings of kept run = %v, %v", kept, err)
+	}
+	if removed, err := store.Prune(10); err != nil || removed != 0 {
+		t.Fatalf("Prune(10) = %d, %v", removed, err)
+	}
+	if _, err := store.Prune(0); err == nil {
+		t.Fatal("Prune(0) must not empty the history")
+	}
+}
+
+func TestDefaultPathSharesConfigDirectory(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+	t.Setenv("AppData", dir)
+	path, err := DefaultPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(path) != "history.db" || filepath.Base(filepath.Dir(path)) != "taildoc" {
+		t.Fatalf("path = %q", path)
+	}
+	store, err := Open(path)
+	if err != nil {
+		t.Fatalf("default parent must exist: %v", err)
+	}
+	store.Close()
 }

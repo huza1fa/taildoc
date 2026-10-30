@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -21,6 +22,21 @@ import (
 
 type Store struct {
 	db *sql.DB
+}
+
+// DefaultPath returns the database beside taildoc's config, so scheduled and
+// manual runs share one history whatever directory they start in. It creates
+// the private directory because Open expects its parent to exist.
+func DefaultPath() (string, error) {
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving user config dir: %w", err)
+	}
+	dir := filepath.Join(base, "taildoc")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("creating history dir: %w", err)
+	}
+	return filepath.Join(dir, "history.db"), nil
 }
 
 func Open(path string) (*Store, error) {
@@ -250,6 +266,40 @@ func (s *Store) FindingsAt(at time.Time) ([]audit.Finding, error) {
 		out = append(out, f)
 	}
 	return out, rows.Err()
+}
+
+// Prune keeps the newest keep runs and returns how many it removed. Findings
+// seen only in removed runs stop counting as history, so one that returns later
+// is reported as new rather than reopened.
+func (s *Store) Prune(keep int) (int, error) {
+	if keep < 1 {
+		return 0, fmt.Errorf("prune must keep at least one run")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var cutoff string
+	err = tx.QueryRow(`SELECT recorded_at FROM runs ORDER BY recorded_at DESC LIMIT 1 OFFSET ?`, keep-1).Scan(&cutoff)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM findings WHERE recorded_at < ?`, cutoff); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM runs WHERE recorded_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return int(removed), tx.Commit()
 }
 
 func (s *Store) Close() error { return s.db.Close() }

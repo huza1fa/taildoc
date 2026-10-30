@@ -167,9 +167,10 @@ Commands:
        --output file                       Write to file instead of stdout
        --snapshot file                     Render saved data instead of live data
   history                             Finding lifecycle over time
-      --db path                           SQLite database (default taildoc.db)
+      --db path                           SQLite database (default: taildoc config dir)
       --limit N --status STATUS           Limit runs; filter finding lifecycle
       --record                            Audit now and store results
+      --prune N                           Keep only the newest N runs
   ui                                  Interactive terminal dashboard
       [--snapshot file]                   Browse a saved snapshot instead of live
   completion <bash|zsh|fish>           Generate shell completion
@@ -226,9 +227,9 @@ Usage:
   taildoc auth status
   taildoc auth logout
 
-Credentials are verified against the live API before being saved to
-~/.config/taildoc/config.json (mode 0600). TS_ACCESS_TOKEN takes precedence
-over the stored config.
+Credentials are verified against the live API before being saved to the user
+config directory with mode 0600 (on Linux, ~/.config/taildoc/config.json).
+TS_ACCESS_TOKEN takes precedence over the stored config.
 `,
 	"inventory": `taildoc inventory — normalized view of users, devices, groups, grants, and routers
 
@@ -240,6 +241,9 @@ Usage:
 Usage:
   taildoc audit [--output FORMAT] [--fail-on SEVERITY] [--snapshot FILE] [--only CHECKS] [--exclude CHECKS]
 
+Auth keys and tailnet settings are read when the credentials allow it; anything
+unreadable is reported as a collection-gaps finding and its checks are skipped.
+
 Flags:
   --output text|json|sarif|markdown   Output format (default text)
   --fail-on info|low|medium|high      Exit with code 3 when findings meet or
@@ -250,6 +254,7 @@ Flags:
 Examples:
   taildoc audit --fail-on high        CI gate: fail on any high finding
   taildoc audit --output sarif        Upload result to GitHub code scanning
+                                      (findings are anchored to policy.hujson)
   taildoc audit --only broad-grants,orphaned-tags
 `,
 	"explain": `taildoc explain — explain access between two resources
@@ -315,8 +320,11 @@ Mermaid output pastes directly into GitHub markdown; dot renders with Graphviz.
 Usage:
   taildoc history [--db PATH] [--record [--snapshot FILE]] [--output text|json]
                   [--limit N] [--since RFC3339] [--status STATUS]
-                  [--severity high|medium|low|info] [--check NAME]
+                  [--severity high|medium|low|info] [--check NAME] [--prune N]
 
+The database defaults to history.db in the taildoc config directory.
+--prune keeps the newest N runs, alone or with --record; a finding seen only in
+pruned runs counts as new, not reopened, if it returns.
 --record audits and stores a run, with new/ongoing/resolved/reopened findings.
 --snapshot audits saved data with --record; otherwise collection is live.
 --limit defaults to the 10 most recent runs; 0 shows all runs.
