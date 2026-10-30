@@ -12,7 +12,8 @@ import (
 )
 
 // ImpactOptions bounds an exact comparison of packet policy for collected
-// devices. Ports are partitioned at rule boundaries rather than sampled.
+// devices. Ports are partitioned at rule boundaries rather than sampled, and
+// MaxEvaluations counts distinct policy evaluations, not device pairs.
 type ImpactOptions struct {
 	Source, Destination string
 	Port                string
@@ -124,21 +125,16 @@ func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactO
 	if opts.Destination != "" && len(destinations) == 0 {
 		return report, fmt.Errorf("no impact destination matches %q", opts.Destination)
 	}
+	// Devices with the same policy identity get the same answer, so the budget
+	// counts distinct evaluations and results are shared between device pairs.
+	oldClass := accessClasses(oldT, newT, oldIdx)
+	newClass := accessClasses(oldT, newT, newIdx)
 	// Reject expensive scopes before producing any partial or misleading output.
-	pairs := int64(len(sources)) * int64(len(destinations))
-	destinationSet := map[string]bool{}
-	for _, d := range destinations {
-		destinationSet[d] = true
-	}
-	for _, s := range sources {
-		if destinationSet[s] {
-			pairs--
-		}
-	}
-	cost := pairs * int64(len(intervals)) * int64(len(opts.Protocols)) * 2
+	cost := (classPairs(oldClass, sources, destinations) + classPairs(newClass, sources, destinations)) * int64(len(intervals)) * int64(len(opts.Protocols))
 	if cost > int64(opts.MaxEvaluations) {
 		return report, fmt.Errorf("impact needs %d evaluations (limit %d); narrow with --source, --destination, or --port", cost, opts.MaxEvaluations)
 	}
+	oldStates, newStates := map[stateKey]string{}, map[stateKey]string{}
 	hostnames := map[string]map[string]bool{}
 	for _, idx := range []map[string]*tailnet.Device{oldIdx, newIdx} {
 		for k, d := range idx {
@@ -173,8 +169,8 @@ func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactO
 					if err := ctx.Err(); err != nil {
 						return report, err
 					}
-					before := accessState(oldT, oldIdx[s], oldIdx[d], r[0], proto)
-					after := accessState(newT, newIdx[s], newIdx[d], r[0], proto)
+					before := cachedState(oldStates, oldClass, oldT, oldIdx, s, d, r[0], proto)
+					after := cachedState(newStates, newClass, newT, newIdx, s, d, r[0], proto)
 					report.Evaluations += 2
 					if before == "unknown" {
 						report.UnknownEvaluations++
@@ -241,6 +237,99 @@ func accessState(t *tailnet.Tailnet, src, dst *tailnet.Device, port int, proto s
 	}
 	return "denied"
 }
+
+type stateKey struct {
+	src, dst, port int
+	proto          string
+}
+
+func cachedState(cache map[stateKey]string, class map[string]int, t *tailnet.Tailnet, idx map[string]*tailnet.Device, src, dst string, port int, proto string) string {
+	if idx[src] == nil || idx[dst] == nil {
+		return "absent"
+	}
+	key := stateKey{class[src], class[dst], port, proto}
+	state, ok := cache[key]
+	if !ok {
+		state = accessState(t, idx[src], idx[dst], port, proto)
+		cache[key] = state
+	}
+	return state
+}
+
+// accessClasses numbers devices by everything Evaluate reads from them. Both
+// snapshots decide whether addresses count, since either may be the one with
+// an IP selector; a device with no user or tag is always matched by address.
+func accessClasses(oldT, newT *tailnet.Tailnet, idx map[string]*tailnet.Device) map[string]int {
+	byAddress := usesAddressSelectors(oldT) || usesAddressSelectors(newT)
+	keys := make([]string, 0, len(idx))
+	for k := range idx {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	ids := map[string]int{}
+	class := make(map[string]int, len(idx))
+	for _, k := range keys {
+		d := idx[k]
+		tags := append([]string(nil), d.Tags...)
+		sort.Strings(tags)
+		identity := d.Owner + "\x00" + strings.Join(tags, "\x00")
+		if len(tags) == 0 {
+			identity = "user\x00" + identity
+		}
+		if byAddress || (d.Owner == "" && len(tags) == 0) {
+			addresses := append([]string(nil), d.Addresses...)
+			sort.Strings(addresses)
+			identity += "\x01" + strings.Join(addresses, "\x00")
+		}
+		id, ok := ids[identity]
+		if !ok {
+			id = len(ids)
+			ids[identity] = id
+		}
+		class[k] = id
+	}
+	return class
+}
+
+// usesAddressSelectors reports whether any rule selects by something other than
+// identity, which would make two devices with one identity differ.
+func usesAddressSelectors(t *tailnet.Tailnet) bool {
+	symbolic := func(sel string) bool {
+		return sel == "*" || strings.Contains(sel, "@") || strings.HasPrefix(sel, "tag:") ||
+			strings.HasPrefix(sel, "group:") || strings.HasPrefix(sel, "autogroup:")
+	}
+	for _, g := range t.Grants {
+		if g == nil {
+			continue
+		}
+		for _, sel := range g.Sources {
+			if !symbolic(sel) {
+				return true
+			}
+		}
+		for _, dst := range g.Destinations {
+			host, _, ok := policy.SplitDestination(dst)
+			if !ok || !symbolic(host) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func classPairs(class map[string]int, sources, destinations []string) int64 {
+	distinct := func(keys []string) int64 {
+		seen := map[int]bool{}
+		for _, k := range keys {
+			if id, ok := class[k]; ok {
+				seen[id] = true
+			}
+		}
+		return int64(len(seen))
+	}
+	return distinct(sources) * distinct(destinations)
+}
+
 func impactIntervals(ts ...*tailnet.Tailnet) [][2]int {
 	bounds := map[int]bool{0: true, 65536: true}
 	add := func(spec string) {
