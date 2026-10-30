@@ -120,7 +120,7 @@ func runAuthLogin(ctx context.Context, args []string) error {
 	defer cancel()
 	summary, err := auth.Verify(verifyCtx, client)
 	if err != nil {
-		return fmt.Errorf("credentials rejected, nothing saved: %w", err)
+		return fmt.Errorf("could not verify credentials, nothing saved: %w", err)
 	}
 	fmt.Println(summary)
 

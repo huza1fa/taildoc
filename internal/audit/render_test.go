@@ -192,3 +192,13 @@ func TestSARIFIdentityIgnoresMutableEvidence(t *testing.T) {
 		t.Fatal("SARIF identity changed with evidence")
 	}
 }
+
+func TestRenderJSONEmptyIsArray(t *testing.T) {
+	data, err := RenderJSON(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "[]" {
+		t.Errorf("RenderJSON(nil) = %s, want []", data)
+	}
+}

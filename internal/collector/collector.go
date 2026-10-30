@@ -103,6 +103,11 @@ func collectDevices(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet
 			SSHEnabled:                d.SSHEnabled,
 			Created:                   d.Created.Time,
 		}
+		// The API reports who registered a tagged device; tags replace that
+		// identity, so the device has no owner.
+		if len(d.Tags) > 0 {
+			dev.Owner = ""
+		}
 		if d.LastSeen != nil {
 			dev.LastSeen = d.LastSeen.Time
 		}

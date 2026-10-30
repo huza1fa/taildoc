@@ -110,3 +110,23 @@ func TestGroupsOfUser(t *testing.T) {
 		t.Errorf("GroupsOfUser(nobody) = %v, want empty", got)
 	}
 }
+
+func TestMatchDevicesReportsSharedHostnames(t *testing.T) {
+	tn := &Tailnet{Devices: []*Device{
+		{Name: "laptop.tail.ts.net.", Hostname: "laptop", Addresses: []string{"100.64.0.1"}},
+		{Name: "laptop-1.tail.ts.net.", Hostname: "laptop", Addresses: []string{"100.64.0.2"}},
+	}}
+	for ref, want := range map[string]int{"laptop": 2, "laptop-1": 1, "laptop-1.tail.ts.net.": 1, "100.64.0.1": 1, "missing": 0} {
+		if got := len(tn.MatchDevices(ref)); got != want {
+			t.Errorf("MatchDevices(%q) = %d devices, want %d", ref, got, want)
+		}
+	}
+}
+
+func TestSanitizeClearsOwnerOfTaggedDevices(t *testing.T) {
+	tn := &Tailnet{Devices: []*Device{{Owner: "alice@example.com", Tags: []string{"tag:infra"}}, {Owner: "bob@example.com"}}}
+	tn.Sanitize()
+	if tn.Devices[0].Owner != "" || tn.Devices[1].Owner != "bob@example.com" {
+		t.Errorf("owners = %q, %q", tn.Devices[0].Owner, tn.Devices[1].Owner)
+	}
+}

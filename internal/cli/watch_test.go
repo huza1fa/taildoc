@@ -39,6 +39,12 @@ func TestCommandContextLeavesWatchUnbounded(t *testing.T) {
 	if _, ok := watchCtx.Deadline(); ok {
 		t.Fatal("watch context unexpectedly has a deadline")
 	}
+	// auth login waits on a person creating a key.
+	authCtx, authCancel := commandContext(base, "auth")
+	defer authCancel()
+	if _, ok := authCtx.Deadline(); ok {
+		t.Fatal("auth context unexpectedly has a deadline")
+	}
 	otherCtx, otherCancel := commandContext(base, "inventory")
 	defer otherCancel()
 	if _, ok := otherCtx.Deadline(); !ok {

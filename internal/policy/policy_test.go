@@ -285,3 +285,51 @@ func TestUnsupportedAlternativesAndWildcardScope(t *testing.T) {
 		t.Fatalf("cyclic set was guessed: %+v", got)
 	}
 }
+
+func TestWildcardIPCoversEveryProtocol(t *testing.T) {
+	for _, entry := range []string{"*", "*:*"} {
+		tn := &tailnet.Tailnet{HasAccessRules: true, Grants: []*tailnet.Grant{{Sources: []string{"*"}, Destinations: []string{"*"}, IP: []string{entry}}}}
+		for _, proto := range []string{"tcp", "sctp", "gre"} {
+			got := Evaluate(tn, Request{SourceLogin: "a@example.com", DestTags: []string{"tag:db"}, Port: "80", Proto: proto})
+			if !got.Allowed {
+				t.Errorf("ip %q proto %s: %+v", entry, proto, got)
+			}
+		}
+	}
+}
+
+func TestIPSetMembersApplyInOrder(t *testing.T) {
+	cases := []struct {
+		name          string
+		members       []string
+		allowed, unkn bool
+	}{
+		{"bare", []string{"100.64.0.0/24"}, true, false},
+		{"add", []string{"add 100.64.0.0/24"}, true, false},
+		{"removed", []string{"add 100.64.0.0/24", "remove 100.64.0.4"}, false, false},
+		{"removed then added", []string{"add 100.64.0.0/24", "remove 100.64.0.4", "add 100.64.0.4"}, true, false},
+		{"other host removed", []string{"add 100.64.0.0/24", "remove 100.64.0.9"}, true, false},
+		{"range", []string{"add 100.64.0.1-100.64.0.9"}, true, false},
+		{"outside range", []string{"add 100.64.0.5-100.64.0.9"}, false, false},
+		{"host alias", []string{"add host:db"}, true, false},
+		{"missing alias", []string{"add host:nope"}, false, true},
+		{"unknown add before certain add", []string{"add autogroup:internet", "add 100.64.0.4"}, true, false},
+		{"unknown add leaves no answer", []string{"add autogroup:internet"}, false, true},
+		{"unknown removal after add", []string{"add 100.64.0.0/24", "remove host:nope"}, false, true},
+		{"unknown removal of absent address", []string{"add 100.64.1.0/24", "remove host:nope"}, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tn := &tailnet.Tailnet{
+				HasAccessRules: true,
+				Hosts:          map[string]string{"db": "100.64.0.4"},
+				IPSets:         map[string][]string{"ipset:prod": c.members},
+				Grants:         []*tailnet.Grant{{Sources: []string{"*"}, Destinations: []string{"ipset:prod"}, IP: []string{"tcp:22"}}},
+			}
+			got := Evaluate(tn, Request{SourceLogin: "a@example.com", DestIPs: []string{"100.64.0.4"}, Port: "22", Proto: "tcp"})
+			if got.Allowed != c.allowed || got.Indeterminate != c.unkn {
+				t.Errorf("allowed=%t indeterminate=%t, want %t/%t: %+v", got.Allowed, got.Indeterminate, c.allowed, c.unkn, got.Unsupported)
+			}
+		})
+	}
+}

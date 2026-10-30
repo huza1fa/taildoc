@@ -279,19 +279,7 @@ func matchSelector(t *tailnet.Tailnet, sel string, req Request, source bool, vis
 		}
 		visiting[sel] = true
 		defer delete(visiting, sel)
-		known := true
-		var notes []Unsupported
-		for _, r := range ranges {
-			m, k, n := matchSelector(t, r, req, source, visiting)
-			if m && k {
-				return true, true, nil
-			}
-			if !k {
-				known = false
-				notes = append(notes, n...)
-			}
-		}
-		return false, known, notes
+		return matchIPSet(t, ranges, req, source, visiting)
 	default:
 		target := sel
 		if alias, ok := t.Hosts[sel]; ok {
@@ -312,6 +300,79 @@ func matchSelector(t *tailnet.Tailnet, sel string, req Request, source bool, vis
 	}
 }
 
+// matchIPSet applies members in order, so a later "remove" can undo an earlier
+// "add". An unevaluable member only leaves the result unknown if it could
+// change the outcome reached so far.
+func matchIPSet(t *tailnet.Tailnet, members []string, req Request, source bool, visiting map[string]bool) (bool, bool, []Unsupported) {
+	in, known := false, true
+	var notes []Unsupported
+	for _, member := range members {
+		remove, target := parseIPSetMember(member)
+		m, k, n := matchIPSetTarget(t, target, req, source, visiting)
+		switch {
+		case !k:
+			notes = append(notes, n...)
+			// Adding to a set already containing the address changes nothing,
+			// and neither does removing from one that lacks it.
+			if in == remove {
+				known = false
+			}
+		case m:
+			in, known = !remove, true
+		}
+	}
+	if !known {
+		return false, false, notes
+	}
+	return in, true, nil
+}
+
+func parseIPSetMember(member string) (remove bool, target string) {
+	op, rest, ok := strings.Cut(strings.TrimSpace(member), " ")
+	if ok && (op == "add" || op == "remove") {
+		return op == "remove", strings.TrimSpace(rest)
+	}
+	return false, strings.TrimSpace(member)
+}
+
+func matchIPSetTarget(t *tailnet.Tailnet, target string, req Request, source bool, visiting map[string]bool) (bool, bool, []Unsupported) {
+	if alias, ok := strings.CutPrefix(target, "host:"); ok {
+		if _, defined := t.Hosts[alias]; !defined {
+			return false, false, []Unsupported{{target, "host alias is not defined"}}
+		}
+		target = alias
+	}
+	if start, end, ok := strings.Cut(target, "-"); ok && looksLikeIPOrCIDR(start) && looksLikeIPOrCIDR(end) {
+		ips := req.DestIPs
+		if source {
+			ips = req.SourceIPs
+		}
+		if len(ips) == 0 {
+			return false, false, []Unsupported{{target, "device IP addresses are unavailable"}}
+		}
+		for _, ip := range ips {
+			if ipInRange(ip, start, end) {
+				return true, true, nil
+			}
+		}
+		return false, true, nil
+	}
+	return matchSelector(t, target, req, source, visiting)
+}
+
+func ipInRange(ip, start, end string) bool {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return false
+	}
+	lo, err1 := netip.ParseAddr(start)
+	hi, err2 := netip.ParseAddr(end)
+	if err1 != nil || err2 != nil || addr.BitLen() != lo.BitLen() {
+		return false
+	}
+	return addr.Compare(lo) >= 0 && addr.Compare(hi) <= 0
+}
+
 // matchPorts intersects destination ports with grant IP entries. Empty grant
 // entries are used only by legacy ACLs; their ports remain in the destination.
 func matchPorts(entries []string, dstPort, want, proto string) (bool, string) {
@@ -328,6 +389,9 @@ func matchPorts(entries []string, dstPort, want, proto string) (bool, string) {
 		p, spec, hasProto := strings.Cut(entry, ":")
 		if !hasProto {
 			p, spec = "", entry
+		}
+		if entry == "*" {
+			hasProto, p = true, "*" // the same grant as "*:*": every protocol
 		}
 		if !hasProto && proto != "" {
 			switch normalizeProto(proto) {

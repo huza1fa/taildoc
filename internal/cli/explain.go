@@ -42,7 +42,10 @@ func runExplain(ctx context.Context, args []string) error {
 
 	srcRef, dstRef := rest[0], rest[1]
 
-	srcDev, srcUser := resolveSource(t, srcRef)
+	srcDev, srcUser, err := resolveSource(t, srcRef)
+	if err != nil {
+		return err
+	}
 	if srcDev == nil && srcUser == nil {
 		return fmt.Errorf("cannot resolve source %q: no device or user matches (try `taildoc inventory` to list names)", srcRef)
 	}
@@ -51,7 +54,10 @@ func runExplain(ctx context.Context, args []string) error {
 	if dstPort != "" && dstPort != "*" && len(policy.PortRanges(dstPort)) == 0 {
 		return usageErrorf("invalid port %q", dstPort)
 	}
-	dstDev, dstTag := resolveDestination(t, dstHost)
+	dstDev, dstTag, err := resolveDestination(t, dstHost)
+	if err != nil {
+		return err
+	}
 	if dstDev == nil && dstTag == "" {
 		return fmt.Errorf("cannot resolve destination %q: no device, tag, or host alias matches (try `taildoc inventory` to list names)", dstHost)
 	}
@@ -85,14 +91,36 @@ func runExplain(ctx context.Context, args []string) error {
 }
 
 // resolveSource finds a device by hostname/IP/name, falling back to a user.
-func resolveSource(t *tailnet.Tailnet, ref string) (*tailnet.Device, *tailnet.User) {
-	if d := t.FindDevice(ref); d != nil {
-		return d, nil
+func resolveSource(t *tailnet.Tailnet, ref string) (*tailnet.Device, *tailnet.User, error) {
+	d, err := uniqueDevice(t, ref)
+	if err != nil {
+		return nil, nil, err
 	}
-	if u := t.FindUser(ref); u != nil {
-		return nil, u
+	if d != nil {
+		return d, nil, nil
 	}
-	return nil, nil
+	return nil, t.FindUser(ref), nil
+}
+
+// uniqueDevice refuses to choose between devices sharing a name: their access
+// can differ, so picking one would answer a question nobody asked.
+func uniqueDevice(t *tailnet.Tailnet, ref string) (*tailnet.Device, error) {
+	matches := t.MatchDevices(ref)
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return matches[0], nil
+	}
+	names := make([]string, 0, len(matches))
+	for _, d := range matches {
+		name := strings.TrimSuffix(d.Name, ".")
+		if name == "" {
+			name = strings.Join(d.Addresses, ", ")
+		}
+		names = append(names, name+" ("+orDefault(d.Owner, strings.Join(d.Tags, ", "))+")")
+	}
+	return nil, fmt.Errorf("%q matches %d devices; use a DNS name or IP: %s", ref, len(matches), strings.Join(names, "; "))
 }
 
 // splitDestPort separates "postgres-prod:5432" into ("postgres-prod", "5432").
@@ -133,25 +161,27 @@ func isNumeric(s string) bool {
 }
 
 // resolveDestination resolves a host reference to a device or a tag.
-func resolveDestination(t *tailnet.Tailnet, host string) (*tailnet.Device, string) {
+func resolveDestination(t *tailnet.Tailnet, host string) (*tailnet.Device, string, error) {
 	if strings.HasPrefix(host, "tag:") {
-		return nil, host // evaluate the tag itself without choosing an arbitrary device
+		return nil, host, nil // evaluate the tag itself without choosing an arbitrary device
 	}
-	if d := t.FindDevice(host); d != nil {
-		return d, ""
+	d, err := uniqueDevice(t, host)
+	if d != nil || err != nil {
+		return d, "", err
 	}
 	if _, err := netip.ParseAddr(host); err == nil {
-		return &tailnet.Device{Hostname: host, Addresses: []string{host}}, ""
+		return &tailnet.Device{Hostname: host, Addresses: []string{host}}, "", nil
 	}
 	if ip, ok := t.Hosts[host]; ok {
-		if d := t.FindDevice(ip); d != nil {
-			return d, ""
+		d, err := uniqueDevice(t, ip)
+		if d != nil || err != nil {
+			return d, "", err
 		}
 		if _, err := netip.ParseAddr(ip); err == nil {
-			return &tailnet.Device{Hostname: host, Addresses: []string{ip}}, ""
+			return &tailnet.Device{Hostname: host, Addresses: []string{ip}}, "", nil
 		}
 	}
-	return nil, ""
+	return nil, "", nil
 }
 
 func buildRequest(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.User, dstDev *tailnet.Device, dstTag, port string) policy.Request {

@@ -2,8 +2,12 @@ package auth
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"tailscale.com/client/tailscale/v2"
@@ -187,3 +191,42 @@ func TestClientBuildsCorrectAuth(t *testing.T) {
 
 // Verify requires network access; it is intentionally not exercised here.
 var _ = context.Background
+
+func TestSaveLeavesCustomParentPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not model POSIX directory modes")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(&Credentials{Method: MethodAPIKey, APIKey: "k"}, filepath.Join(dir, "config.json")); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("existing parent perms = %o, want 755", perm)
+	}
+}
+
+func TestVerifyDoesNotClaimCallerIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"users":[{"loginName":"someone-else@example.com"}]}`))
+	}))
+	defer server.Close()
+	base, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := Verify(context.Background(), &tailscale.Client{BaseURL: base, APIKey: "k", Tailnet: "-"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "connected (1 users visible)" {
+		t.Errorf("summary = %q", summary)
+	}
+}

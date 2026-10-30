@@ -50,7 +50,6 @@ func fixture() *tailnet.Tailnet {
 				Hostname:                  "web01",
 				OS:                        "linux",
 				ClientVersion:             "1.80.0",
-				Owner:                     "alice@example.com",
 				Tags:                      []string{"tag:prod", "tag:web"},
 				Addresses:                 []string{"100.64.0.1", "fd7a:115c:a1e0::1"},
 				AdvertisedRoutes:          []string{"10.0.0.0/24"},

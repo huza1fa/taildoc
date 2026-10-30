@@ -38,11 +38,19 @@ func DefaultPath() (string, error) {
 	if p := os.Getenv("TAILDOC_CONFIG"); p != "" {
 		return p, nil
 	}
+	dir, err := defaultConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
+}
+
+func defaultConfigDir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", fmt.Errorf("resolving user config dir: %w", err)
 	}
-	return filepath.Join(dir, "taildoc", "config.json"), nil
+	return filepath.Join(dir, "taildoc"), nil
 }
 
 // Load reads credentials from path. It returns (nil, nil) if the file does
@@ -62,14 +70,19 @@ func Load(path string) (*Credentials, error) {
 	return &c, nil
 }
 
-// Save writes credentials to path, creating parent directories with mode
-// 0700 and the file itself with mode 0600.
+// Save writes credentials to path, creating missing parent directories with
+// mode 0700 and the file itself with mode 0600.
 func Save(c *Credentials, path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
-	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("securing config dir: %w", err)
+	// Only taildoc's own directory is tightened: TAILDOC_CONFIG can point into a
+	// shared directory, such as $HOME, whose permissions are not ours to change.
+	if defaultDir, err := defaultConfigDir(); err == nil && dir == defaultDir {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("securing config dir: %w", err)
+		}
 	}
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
@@ -153,9 +166,9 @@ func Client(creds *Credentials) (*tailscale.Client, error) {
 	}
 }
 
-// Verify makes a cheap read call against the API and returns a human
-// readable summary such as "connected as alice@example.com (3 users)" or,
-// for OAuth clients, "OAuth client valid (3 users visible)".
+// Verify makes a cheap read call against the API and returns a human readable
+// summary. The API does not identify the caller, so the summary only reports
+// what the credentials can see.
 func Verify(ctx context.Context, c *tailscale.Client) (string, error) {
 	users, err := c.Users().List(ctx, nil, nil)
 	if err != nil {
@@ -164,8 +177,5 @@ func Verify(ctx context.Context, c *tailscale.Client) (string, error) {
 	if c.Auth != nil {
 		return fmt.Sprintf("OAuth client valid (%d users visible)", len(users)), nil
 	}
-	if len(users) > 0 {
-		return fmt.Sprintf("connected as %s (%d users)", users[0].LoginName, len(users)), nil
-	}
-	return "connected (0 users)", nil
+	return fmt.Sprintf("connected (%d users visible)", len(users)), nil
 }

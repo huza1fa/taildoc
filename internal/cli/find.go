@@ -66,7 +66,11 @@ func runShow(ctx context.Context, args []string) error {
 		return err
 	}
 	ref := fs.Arg(0)
-	if d := t.FindDevice(ref); d != nil {
+	d, err := uniqueDevice(t, ref)
+	if err != nil {
+		return err
+	}
+	if d != nil {
 		printDeviceDetail(t, d)
 		return nil
 	}

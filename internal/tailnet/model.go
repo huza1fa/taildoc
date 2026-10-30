@@ -118,6 +118,10 @@ func (t *Tailnet) Sanitize() {
 		if d == nil {
 			continue
 		}
+		// Older snapshots kept the registering user on tagged devices.
+		if len(d.Tags) > 0 {
+			d.Owner = ""
+		}
 		devs = append(devs, d)
 	}
 	t.Devices = devs
@@ -163,6 +167,30 @@ func (t *Tailnet) FindDevice(ref string) *Device {
 		}
 	}
 	return nil
+}
+
+// MatchDevices returns every device a reference could mean. DNS names and IPs
+// identify one device, while hostnames and short names may be shared, so
+// callers making a decision must treat more than one result as ambiguous.
+func (t *Tailnet) MatchDevices(ref string) []*Device {
+	var loose []*Device
+	for _, d := range t.Devices {
+		if d == nil {
+			continue
+		}
+		if d.Name == ref {
+			return []*Device{d}
+		}
+		for _, ip := range d.Addresses {
+			if ip == ref {
+				return []*Device{d}
+			}
+		}
+		if d.Hostname == ref || trimDNS(d.Name) == ref {
+			loose = append(loose, d)
+		}
+	}
+	return loose
 }
 
 // FindUser resolves a user by login name or display name.

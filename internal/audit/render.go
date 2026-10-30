@@ -41,6 +41,9 @@ type sarifReport struct {
 }
 
 func RenderJSON(fs []Finding) ([]byte, error) {
+	if fs == nil {
+		fs = []Finding{} // consumers expect an array, even when clean
+	}
 	return json.Marshal(fs)
 }
 

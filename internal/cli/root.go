@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -17,6 +18,18 @@ import (
 
 // Version is set at build time via -ldflags "-X ...cli.Version=vX.Y.Z".
 var Version = "dev"
+
+// versionString prefers the release ldflag and falls back to the module version
+// embedded by `go install`, which has no ldflags.
+func versionString() string {
+	if Version != "dev" {
+		return Version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return Version
+}
 
 // Run executes the CLI with the given arguments and returns an exit code.
 func Run(args []string) int {
@@ -81,7 +94,7 @@ func Run(args []string) int {
 		usage()
 		return 0
 	case "--version", "-v", "version":
-		fmt.Printf("taildoc %s\n", Version)
+		fmt.Printf("taildoc %s\n", versionString())
 		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", args[0])
@@ -111,9 +124,10 @@ func Run(args []string) int {
 }
 
 // commandContext gives one-shot commands a bounded lifetime while allowing
-// watch to continue until the user interrupts it.
+// watch to continue until the user interrupts it. auth waits on a person
+// creating a key, so it bounds only its own API calls.
 func commandContext(base context.Context, command string) (context.Context, context.CancelFunc) {
-	if command == "watch" || command == "ui" {
+	if command == "watch" || command == "ui" || command == "auth" {
 		return base, func() {}
 	}
 	return context.WithTimeout(base, 60*time.Second)

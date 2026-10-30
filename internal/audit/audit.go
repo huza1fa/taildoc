@@ -461,7 +461,7 @@ func checkPrivilegedUserDevices(t *tailnet.Tailnet) []Finding {
 		if d == nil {
 			continue
 		}
-		if d.Owner == "" || len(d.AdvertisedRoutes) == 0 {
+		if d.Owner == "" || len(d.Tags) > 0 || len(d.AdvertisedRoutes) == 0 {
 			continue
 		}
 		out = append(out, Finding{

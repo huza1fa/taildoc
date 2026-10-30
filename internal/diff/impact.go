@@ -139,12 +139,21 @@ func AccessImpact(ctx context.Context, oldT, newT *tailnet.Tailnet, opts ImpactO
 	if cost > int64(opts.MaxEvaluations) {
 		return report, fmt.Errorf("impact needs %d evaluations (limit %d); narrow with --source, --destination, or --port", cost, opts.MaxEvaluations)
 	}
+	hostnames := map[string]map[string]bool{}
+	for _, idx := range []map[string]*tailnet.Device{oldIdx, newIdx} {
+		for k, d := range idx {
+			if hostnames[d.Hostname] == nil {
+				hostnames[d.Hostname] = map[string]bool{}
+			}
+			hostnames[d.Hostname][k] = true
+		}
+	}
 	name := func(k string) string {
 		d := newIdx[k]
 		if d == nil {
 			d = oldIdx[k]
 		}
-		if d.Hostname != "" {
+		if d.Hostname != "" && (len(hostnames[d.Hostname]) == 1 || d.Name == "") {
 			return d.Hostname
 		}
 		if d.Name != "" {
