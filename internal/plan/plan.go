@@ -17,12 +17,13 @@ type Report struct {
 	Warnings            []string          `json:"warnings"`
 	Changes             []diff.Change     `json:"changes"`
 	Impact              diff.ImpactReport `json:"impact"`
+	Tests               []TestResult      `json:"tests"`
 }
 
 // Preview applies a complete replacement policy to a shallow inventory copy.
 // Neither the baseline nor the policy is mutated; devices, users, tags, and
 // route approvals stay fixed, isolating policy effects from inventory drift.
-func Preview(ctx context.Context, baseline *tailnet.Tailnet, acl *tailscale.ACL, warnings []string, opts diff.ImpactOptions) (Report, error) {
+func Preview(ctx context.Context, baseline *tailnet.Tailnet, acl *tailscale.ACL, warnings []string, opts diff.ImpactOptions, tests ...PolicyTest) (Report, error) {
 	var report Report
 	if baseline == nil || acl == nil {
 		return report, fmt.Errorf("plan requires a snapshot and proposed policy")
@@ -41,6 +42,7 @@ func Preview(ctx context.Context, baseline *tailnet.Tailnet, acl *tailscale.ACL,
 	}
 	report.BaselineCollectedAt = baseline.CollectedAt
 	report.Impact = impact
+	report.Tests = RunTests(&candidate, tests)
 	report.Changes = diff.Diff(baseline, &candidate)
 	if report.Changes == nil {
 		report.Changes = []diff.Change{}

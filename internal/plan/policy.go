@@ -20,70 +20,94 @@ import (
 
 const maxPolicyBytes = 4 << 20
 
-// LoadPolicy bounds allocation before reading and rejects non-regular files.
-// Symlinks to regular files are allowed, as with other local input files.
+// Proposal is a parsed replacement policy and the tests it carries.
+type Proposal struct {
+	ACL      *tailscale.ACL
+	Tests    []PolicyTest
+	Warnings []string
+}
+
+// LoadPolicy reads a proposal and returns only its policy and warnings.
 func LoadPolicy(path string) (*tailscale.ACL, []string, error) {
+	proposal, err := LoadProposal(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return proposal.ACL, proposal.Warnings, nil
+}
+
+// LoadProposal bounds allocation before reading and rejects non-regular files.
+// Symlinks to regular files are allowed, as with other local input files.
+func LoadProposal(path string) (*Proposal, error) {
 	// Check before opening too: opening a named pipe for reading can block.
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("stat policy %q: %w", path, err)
+		return nil, fmt.Errorf("stat policy %q: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("policy %q must be a regular file", path)
+		return nil, fmt.Errorf("policy %q must be a regular file", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("open policy %q: %w", path, err)
+		return nil, fmt.Errorf("open policy %q: %w", path, err)
 	}
 	defer f.Close()
 	info, err = f.Stat()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if !info.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("policy %q must be a regular file", path)
+		return nil, fmt.Errorf("policy %q must be a regular file", path)
 	}
 	if info.Size() > maxPolicyBytes {
-		return nil, nil, fmt.Errorf("policy %q exceeds %d byte limit", path, maxPolicyBytes)
+		return nil, fmt.Errorf("policy %q exceeds %d byte limit", path, maxPolicyBytes)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxPolicyBytes+1))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read policy %q: %w", path, err)
+		return nil, fmt.Errorf("read policy %q: %w", path, err)
 	}
-	acl, warnings, err := ParsePolicy(data)
+	proposal, err := parseProposal(data)
 	if err != nil {
-		return nil, nil, fmt.Errorf("parse policy %q: %w", path, err)
+		return nil, fmt.Errorf("parse policy %q: %w", path, err)
 	}
-	return acl, warnings, nil
+	return proposal, nil
 }
 
 // ParsePolicy accepts HuJSON but deliberately rejects ambiguous input and
 // unknown packet-rule fields. Ignoring a future restriction could falsely
 // report a certain allow. Non-packet sections are disclosed, not evaluated.
 func ParsePolicy(data []byte) (*tailscale.ACL, []string, error) {
-	if len(data) > maxPolicyBytes {
-		return nil, nil, fmt.Errorf("policy exceeds %d byte limit", maxPolicyBytes)
-	}
-	if !utf8.Valid(data) {
-		return nil, nil, fmt.Errorf("policy must be UTF-8")
-	}
-	if err := checkDepth(data); err != nil {
-		return nil, nil, err
-	}
-	v, err := hujson.Parse(data)
+	proposal, err := parseProposal(data)
 	if err != nil {
 		return nil, nil, err
 	}
+	return proposal.ACL, proposal.Warnings, nil
+}
+
+func parseProposal(data []byte) (*Proposal, error) {
+	if len(data) > maxPolicyBytes {
+		return nil, fmt.Errorf("policy exceeds %d byte limit", maxPolicyBytes)
+	}
+	if !utf8.Valid(data) {
+		return nil, fmt.Errorf("policy must be UTF-8")
+	}
+	if err := checkDepth(data); err != nil {
+		return nil, err
+	}
+	v, err := hujson.Parse(data)
+	if err != nil {
+		return nil, err
+	}
 	if _, ok := v.Value.(*hujson.Object); !ok {
-		return nil, nil, fmt.Errorf("policy must be an object")
+		return nil, fmt.Errorf("policy must be an object")
 	}
 	if err := checkValues(v); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	v.Standardize()
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(v.Pack(), &fields); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var warnings []string
 	// Stable ordering makes both diagnostics and machine-readable output repeatable.
@@ -95,17 +119,23 @@ func ParsePolicy(data []byte) (*tailscale.ACL, []string, error) {
 	for _, key := range keys {
 		switch key {
 		case "acls", "grants", "groups", "hosts", "tagOwners", "ipsets", "postures", "defaultSrcPosture", "autoApprovers":
-		case "ssh", "sshTests", "tests", "nodeAttrs", "derpMap", "disableIPv4", "oneCGNATRoute", "randomizeClientPort", "attrConfig":
+		case "tests":
+		case "ssh", "sshTests", "nodeAttrs", "derpMap", "disableIPv4", "oneCGNATRoute", "randomizeClientPort", "attrConfig":
 			warnings = append(warnings, fmt.Sprintf("Policy section %q is outside this packet-access preview and is not evaluated or validated.", key))
 			delete(fields, key)
 		default:
-			return nil, nil, fmt.Errorf("unknown policy section %q; refusing to ignore possible access semantics", key)
+			return nil, fmt.Errorf("unknown policy section %q; refusing to ignore possible access semantics", key)
 		}
 	}
+	tests, err := parseTests(fields["tests"])
+	if err != nil {
+		return nil, err
+	}
+	delete(fields, "tests")
 	for _, key := range []string{"acls", "grants"} {
 		if raw, ok := fields[key]; ok {
 			if err := checkRules(key, raw); err != nil {
-				return nil, nil, err
+				return nil, err
 			}
 		}
 	}
@@ -113,25 +143,25 @@ func ParsePolicy(data []byte) (*tailscale.ACL, []string, error) {
 	// the evaluator still labels any applicable posture requirement as unknown.
 	postures, err := parsePostures(fields["postures"])
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	delete(fields, "postures")
 	encoded, err := json.Marshal(fields)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	var acl tailscale.ACL
 	if err := strictDecode(encoded, &acl); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	acl.Postures = postures
 	if err := validateRules(&acl); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if acl.ACLs == nil && acl.Grants == nil {
 		warnings = append(warnings, "Proposed policy omits both acls and grants; the local evaluator uses Tailscale's default allow-all packet policy.")
 	}
-	return &acl, warnings, nil
+	return &Proposal{&acl, tests, warnings}, nil
 }
 
 func strictDecode(data []byte, dst any) error {

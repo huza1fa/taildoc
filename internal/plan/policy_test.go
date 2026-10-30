@@ -31,7 +31,7 @@ func TestParseHuJSONAndNormalize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(warnings) != 3 || !strings.Contains(warnings[0], `"ssh"`) || !strings.Contains(warnings[2], `"tests"`) {
+	if len(warnings) != 2 || !strings.Contains(warnings[0], `"ssh"`) || !strings.Contains(warnings[1], `"sshTests"`) {
 		t.Fatalf("unexpected ignored-section warnings: %v", warnings)
 	}
 	tn := &tailnet.Tailnet{}

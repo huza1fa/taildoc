@@ -11,6 +11,7 @@ import (
 
 	"github.com/huza1fa/taildoc/internal/plan"
 	"github.com/huza1fa/taildoc/internal/snapshot"
+	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 func policyFile(t *testing.T, content string) string {
@@ -169,6 +170,32 @@ func TestPlanShellCompletions(t *testing.T) {
 		})
 		if !strings.Contains(out, "plan") || !strings.Contains(out, "policy") {
 			t.Fatalf("missing plan completion for %s", shell)
+		}
+	}
+}
+
+func TestPlanFailOnExitCodes(t *testing.T) {
+	dir := t.TempDir()
+	snapPath, policyPath := filepath.Join(dir, "base.json"), filepath.Join(dir, "policy.hujson")
+	base := &tailnet.Tailnet{HasAccessRules: true, Devices: []*tailnet.Device{
+		{ID: "1", Hostname: "laptop", Owner: "alice@example.com", Addresses: []string{"100.64.0.1"}},
+		{ID: "2", Hostname: "db", Tags: []string{"tag:db"}, Addresses: []string{"100.64.0.2"}},
+	}}
+	if err := snapshot.Save(base, snapPath); err != nil {
+		t.Fatal(err)
+	}
+	policy := `{"grants":[{"src":["alice@example.com"],"dst":["tag:db"],"ip":["tcp:22"]}],
+		"tests":[{"src":"alice@example.com","deny":["tag:db:22"]}]}`
+	if err := os.WriteFile(policyPath, []byte(policy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"plan", "--snapshot", snapPath, "--policy", policyPath, "--output", "json"}
+	for _, c := range []struct {
+		failOn string
+		want   int
+	}{{"", 0}, {"lost", 0}, {"gained", 3}, {"tests", 3}, {"lost,gained", 3}, {"gaind", 2}} {
+		if got := Run(append(args[:len(args):len(args)], "--fail-on", c.failOn)); got != c.want {
+			t.Errorf("--fail-on %q exit = %d, want %d", c.failOn, got, c.want)
 		}
 	}
 }

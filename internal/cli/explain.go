@@ -18,12 +18,13 @@ func runExplain(ctx context.Context, args []string) error {
 	snapshotPath := fs.String("snapshot", "", "evaluate a saved snapshot instead of collecting live data")
 	protoFlag := fs.String("proto", "", "protocol: tcp, udp, icmp (default any)")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	exitCode := fs.Bool("exit-code", false, "exit 4 when denied and 5 when it cannot be determined")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) != 2 {
-		return fmt.Errorf("usage: taildoc explain [--snapshot FILE] [--proto PROTO] [--json] <source> <destination[:port]>")
+		return fmt.Errorf("usage: taildoc explain [--snapshot FILE] [--proto PROTO] [--json] [--exit-code] <source> <destination[:port]>")
 	}
 
 	if *protoFlag != "" && !policy.ValidProtocol(*protoFlag) {
@@ -42,11 +43,15 @@ func runExplain(ctx context.Context, args []string) error {
 
 	srcRef, dstRef := rest[0], rest[1]
 
-	srcDev, srcUser, err := resolveSource(t, srcRef)
-	if err != nil {
+	var srcDev *tailnet.Device
+	var srcUser *tailnet.User
+	srcTag := ""
+	if strings.HasPrefix(srcRef, "tag:") {
+		srcTag = srcRef
+	} else if srcDev, srcUser, err = resolveSource(t, srcRef); err != nil {
 		return err
 	}
-	if srcDev == nil && srcUser == nil {
+	if srcDev == nil && srcUser == nil && srcTag == "" {
 		return fmt.Errorf("cannot resolve source %q: no device or user matches (try `taildoc inventory` to list names)", srcRef)
 	}
 
@@ -63,6 +68,9 @@ func runExplain(ctx context.Context, args []string) error {
 	}
 
 	req := buildRequest(t, srcDev, srcUser, dstDev, dstTag, dstPort)
+	if srcTag != "" {
+		req.SourceTags = []string{srcTag}
+	}
 	req.Proto = *protoFlag
 
 	result := policy.Evaluate(t, req)
@@ -81,13 +89,23 @@ func runExplain(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		_, err = os.Stdout.Write(append(data, '\n'))
-		return err
+		if _, err = os.Stdout.Write(append(data, '\n')); err != nil {
+			return err
+		}
+	} else {
+		printExplain(t, srcDev, srcUser, srcTag, dstDev, dstTag, req)
+		printResult(result, dstPort)
 	}
-	printExplain(t, srcDev, srcUser, dstDev, dstTag, req)
-
-	printResult(result, dstPort)
-	return nil
+	if !*exitCode {
+		return nil
+	}
+	switch {
+	case result.Allowed:
+		return nil
+	case result.Indeterminate:
+		return ErrAccessUnknown
+	}
+	return ErrAccessDenied
 }
 
 // resolveSource finds a device by hostname/IP/name, falling back to a user.
@@ -210,7 +228,7 @@ func buildRequest(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.U
 	return req
 }
 
-func printExplain(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.User, dstDev *tailnet.Device, dstTag string, req policy.Request) {
+func printExplain(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.User, srcTag string, dstDev *tailnet.Device, dstTag string, req policy.Request) {
 	fmt.Println("Source")
 	if srcDev != nil {
 		fmt.Printf("  %s (%s)\n", srcDev.Hostname, srcDev.OS)
@@ -221,6 +239,9 @@ func printExplain(t *tailnet.Tailnet, srcDev *tailnet.Device, srcUser *tailnet.U
 		if len(srcDev.Tags) > 0 {
 			fmt.Printf("  tags: %s\n", strings.Join(srcDev.Tags, ", "))
 		}
+	} else if srcTag != "" {
+		fmt.Printf("  %s (tag selector)\n", srcTag)
+		fmt.Println("  Use a device name to include its IP addresses and other tags in evaluation.")
 	} else {
 		u := srcUser
 		fmt.Printf("  %s\n", u.LoginName)

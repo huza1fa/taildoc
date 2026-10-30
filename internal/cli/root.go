@@ -117,6 +117,16 @@ func Run(args []string) int {
 		if errors.Is(err, ErrDoctorFailed) {
 			return 1
 		}
+		if errors.Is(err, ErrPlanFailed) {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 3
+		}
+		if errors.Is(err, ErrAccessDenied) {
+			return 4
+		}
+		if errors.Is(err, ErrAccessUnknown) {
+			return 5
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		return 1
 	}
@@ -172,7 +182,8 @@ First run:
   OAuth clients: https://login.tailscale.com/admin/settings/oauth
 
 Exit codes:
-  0 success    1 error    2 bad usage    3 findings met --fail-on threshold
+  0 success    1 error    2 bad usage    3 findings or plan met --fail-on
+  With explain --exit-code: 4 denied    5 cannot determine
 
 More help:
   taildoc help <command> shows flags for a single command.
@@ -185,7 +196,7 @@ var cmdHelp = map[string]string{
 Usage:
   taildoc plan --snapshot FILE --policy FILE [--output text|json]
                [--source DEVICE] [--destination DEVICE] [--port PORT]
-               [--proto tcp,udp,sctp]
+               [--proto tcp,udp,sctp] [--fail-on CONDITIONS]
 
 Both files are required. The complete HuJSON policy replaces the snapshot's
 policy in memory; inventory, device tags, and route approvals remain unchanged.
@@ -198,9 +209,15 @@ Unsupported selectors, posture, and via constraints remain unknown. SSH,
 application capabilities, service/subnet destinations, and runtime state are
 not evaluated. Unknown evaluations are counted even when unchanged.
 
+The policy's tests section is run against the proposal with the local
+evaluator. --fail-on takes a comma-separated list and exits 3 when any applies:
+gained, lost, uncertain (access changes), unknown (any unknown evaluation or
+test), tests (a failed test).
+
 Policies are limited to 4 MiB and 128 nesting levels. Duplicate keys, nulls,
 unknown sections/rule fields, and malformed packet rules are rejected.
-Exit 0 means the preview completed, not that deploying the policy is safe.
+Without --fail-on, exit 0 means the preview completed, not that deploying the
+policy is safe.
 `,
 	"auth": `taildoc auth — connect to your tailnet
 
@@ -238,12 +255,15 @@ Examples:
 	"explain": `taildoc explain — explain access between two resources
 
 Usage:
-  taildoc explain [--snapshot FILE] [--proto PROTO] [--json] <source> <destination[:port]>
+  taildoc explain [--snapshot FILE] [--proto PROTO] [--json] [--exit-code]
+                  <source> <destination[:port]>
 
-Source is a device hostname, IP, or user login. Destination may add a port,
+--exit-code exits 4 when denied and 5 when it cannot be determined.
+Source is a device hostname, IP, tag, or user login. Destination may add a port,
 e.g. "db-prod:5432". Concrete destination IPs and host aliases are supported.
 A tag destination evaluates that selector; use a device name to include its
 IP addresses and other tags. Omitted port/protocol asks if any path is allowed.
+A hostname shared by several devices is an error; use a DNS name or IP.
 Unsupported selectors, posture, and routing conditions report uncertainty.
 `,
 	"find": `taildoc find — quickly locate a tailnet resource
