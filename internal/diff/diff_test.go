@@ -231,3 +231,22 @@ func rank(kind string) int {
 		return 2
 	}
 }
+
+func TestDiffReportsSSHNodeAttrAndSettingsChanges(t *testing.T) {
+	oldT := &tailnet.Tailnet{Settings: &tailnet.Settings{DevicesApprovalOn: true}}
+	newT := &tailnet.Tailnet{
+		Settings:  &tailnet.Settings{},
+		SSHRules:  []*tailnet.SSHRule{{Action: "accept", Sources: []string{"*"}, Users: []string{"root"}}},
+		NodeAttrs: []*tailnet.NodeAttr{{Targets: []string{"*"}, Attrs: []string{"funnel"}}},
+	}
+	var whats []string
+	for _, c := range Diff(oldT, newT) {
+		whats = append(whats, c.Kind+" "+c.What)
+	}
+	got := strings.Join(whats, "\n")
+	for _, want := range []string{"added ssh rule", "added node attribute", "changed tailnet settings"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+}

@@ -336,11 +336,58 @@ func diffPolicyControls(oldT, newT *tailnet.Tailnet) []Change {
 	if !equalSet(old.AutoApprovers.ExitNode, new.AutoApprovers.ExitNode) {
 		changes = append(changes, Change{Kind: "changed", What: "auto approver exit nodes", Detail: fmt.Sprintf("%s -> %s", joinSorted(old.AutoApprovers.ExitNode), joinSorted(new.AutoApprovers.ExitNode))})
 	}
+	changes = append(changes, diffRules("ssh rule", sshCanonical(old), sshCanonical(new))...)
+	changes = append(changes, diffRules("node attribute", nodeAttrCanonical(old), nodeAttrCanonical(new))...)
+	if old.Settings != nil && new.Settings != nil && *old.Settings != *new.Settings {
+		changes = append(changes, Change{Kind: "changed", What: "tailnet settings", Detail: fmt.Sprintf("%+v -> %+v", *old.Settings, *new.Settings)})
+	}
 	if old.HasAccessRules != new.HasAccessRules {
 		changes = append(changes, Change{Kind: "changed", What: "access policy mode", Detail: fmt.Sprintf("explicit rules %t -> %t", old.HasAccessRules, new.HasAccessRules)})
 	}
 	if !equalSet(old.DefaultSrcPosture, new.DefaultSrcPosture) {
 		changes = append(changes, Change{Kind: "changed", What: "default source posture", Detail: fmt.Sprintf("%s -> %s", joinSorted(old.DefaultSrcPosture), joinSorted(new.DefaultSrcPosture))})
+	}
+	return changes
+}
+
+func sshCanonical(t *tailnet.Tailnet) []string {
+	var out []string
+	for _, r := range t.SSHRules {
+		if r != nil {
+			out = append(out, strings.Join([]string{r.Action, joinSorted(r.Sources), joinSorted(r.Destinations), joinSorted(r.Users)}, "|"))
+		}
+	}
+	return out
+}
+
+func nodeAttrCanonical(t *tailnet.Tailnet) []string {
+	var out []string
+	for _, a := range t.NodeAttrs {
+		if a != nil {
+			out = append(out, joinSorted(a.Targets)+"|"+joinSorted(a.Attrs))
+		}
+	}
+	return out
+}
+
+func diffRules(kind string, old, new []string) []Change {
+	counts := map[string]int{}
+	for _, r := range old {
+		counts[r]--
+	}
+	for _, r := range new {
+		counts[r]++
+	}
+	var changes []Change
+	for rule, n := range counts {
+		change := Change{Kind: "added", What: kind + " " + rule}
+		if n < 0 {
+			change.Kind = "removed"
+			n = -n
+		}
+		for i := 0; i < n; i++ {
+			changes = append(changes, change)
+		}
 	}
 	return changes
 }

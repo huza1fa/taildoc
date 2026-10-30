@@ -213,3 +213,22 @@ func BenchmarkPreview(b *testing.B) {
 		}
 	}
 }
+
+func TestPreviewDoesNotReportUnreadSectionsAsRemoved(t *testing.T) {
+	base := fixture()
+	base.SSHRules = []*tailnet.SSHRule{{Action: "accept", Sources: []string{"*"}, Users: []string{"root"}}}
+	base.NodeAttrs = []*tailnet.NodeAttr{{Targets: []string{"*"}, Attrs: []string{"funnel"}}}
+	acl, warnings, err := ParsePolicy([]byte(`{"grants":[], "ssh":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := Preview(context.Background(), base, acl, warnings, diff.ImpactOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range r.Changes {
+		if strings.Contains(c.What, "ssh rule") || strings.Contains(c.What, "node attribute") {
+			t.Errorf("unexpected change: %+v", c)
+		}
+	}
+}

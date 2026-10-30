@@ -19,6 +19,16 @@ func Normalize(t *tailnet.Tailnet, acl *tailscale.ACL) {
 	t.Postures = make(map[string][]string, len(acl.Postures))
 	t.Grants = nil
 	t.AutoApprovers = tailnet.AutoApprovers{}
+	t.SSHRules = nil
+	t.NodeAttrs = nil
+	for _, r := range acl.SSH {
+		t.SSHRules = append(t.SSHRules, &tailnet.SSHRule{
+			Action: r.Action, Sources: r.Source, Destinations: r.Destination, Users: r.Users,
+		})
+	}
+	for _, a := range acl.NodeAttrs {
+		t.NodeAttrs = append(t.NodeAttrs, &tailnet.NodeAttr{Targets: a.Target, Attrs: a.Attr})
+	}
 	for name, ranges := range acl.IPSets {
 		t.IPSets[name] = ranges
 	}

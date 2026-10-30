@@ -32,6 +32,9 @@ func Preview(ctx context.Context, baseline *tailnet.Tailnet, acl *tailscale.ACL,
 	}
 	candidate := *baseline
 	policy.Normalize(&candidate, acl)
+	// ParsePolicy does not read these sections, so a difference here would be
+	// an artifact of the preview, not of the proposal.
+	candidate.SSHRules, candidate.NodeAttrs = baseline.SSHRules, baseline.NodeAttrs
 	impact, err := diff.AccessImpact(ctx, baseline, &candidate, opts)
 	if err != nil {
 		return report, err

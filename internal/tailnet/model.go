@@ -4,6 +4,7 @@
 package tailnet
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,6 +26,11 @@ type Tailnet struct {
 	Postures          map[string][]string // posture name -> conditions
 	DefaultSrcPosture []string            // policy-wide posture requirements
 	AutoApprovers     AutoApprovers
+	SSHRules          []*SSHRule  // Tailscale SSH rules from policy
+	NodeAttrs         []*NodeAttr // node attribute rules from policy
+	AuthKeys          []*AuthKey  // active auth keys; optional, see CollectionGaps
+	Settings          *Settings   // nil when unavailable; see CollectionGaps
+	CollectionGaps    []string    // optional data the credentials could not read
 }
 
 // ManagingRoles are the Tailscale roles allowed to administer a tailnet.
@@ -99,6 +105,40 @@ type AutoApprovers struct {
 	Services map[string][]string
 }
 
+// SSHRule is one entry of the policy file's ssh section.
+type SSHRule struct {
+	Action       string // accept or check
+	Sources      []string
+	Destinations []string
+	Users        []string // login names on the destination, e.g. root
+}
+
+// NodeAttr is one entry of the policy file's nodeAttrs section.
+type NodeAttr struct {
+	Targets []string
+	Attrs   []string
+}
+
+// AuthKey is the metadata of an active auth key. It never holds the secret.
+type AuthKey struct {
+	ID            string
+	Description   string
+	Created       time.Time
+	Expires       time.Time
+	Reusable      bool
+	Ephemeral     bool
+	Preauthorized bool
+	Tags          []string
+}
+
+// Settings holds the tailnet settings relevant to auditing.
+type Settings struct {
+	DevicesApprovalOn      bool
+	UsersApprovalOn        bool
+	DevicesAutoUpdatesOn   bool
+	DevicesKeyDurationDays int
+}
+
 // Sanitize drops nil entries (e.g. from JSON "null" array items in a corrupt
 // snapshot) and ensures maps are non-nil so callers can range safely.
 func (t *Tailnet) Sanitize() {
@@ -133,6 +173,9 @@ func (t *Tailnet) Sanitize() {
 		grants = append(grants, g)
 	}
 	t.Grants = grants
+	t.SSHRules = slices.DeleteFunc(t.SSHRules, func(r *SSHRule) bool { return r == nil })
+	t.NodeAttrs = slices.DeleteFunc(t.NodeAttrs, func(a *NodeAttr) bool { return a == nil })
+	t.AuthKeys = slices.DeleteFunc(t.AuthKeys, func(k *AuthKey) bool { return k == nil })
 	if t.Groups == nil {
 		t.Groups = map[string][]string{}
 	}

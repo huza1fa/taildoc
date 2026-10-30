@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -50,6 +51,11 @@ var checks = []checkFunc{
 	checkOrphanedTags,
 	checkInactiveUsers,
 	checkPrivilegedUserDevices,
+	checkSSHAccess,
+	checkFunnelExposure,
+	checkAuthKeys,
+	checkTailnetSettings,
+	checkCollectionGaps,
 }
 
 // CheckNames lists stable filter names in the same order as checks,
@@ -64,6 +70,30 @@ var CheckNames = []string{
 	"orphaned-tags",
 	"inactive-users",
 	"privileged-user-devices",
+	"ssh-access",
+	"funnel-exposure",
+	"auth-keys",
+	"tailnet-settings",
+	"collection-gaps",
+}
+
+// checkSummaries describes each check for SARIF rule metadata, independently
+// of the per-finding titles that embed counts and names.
+var checkSummaries = map[string]string{
+	"stale-devices":           "Devices that have not connected recently",
+	"key-expiry":              "Expired, expiring, or non-expiring node keys",
+	"outdated-clients":        "Devices with a Tailscale update available",
+	"broad-grants":            "Access rules with wildcard destinations or all ports",
+	"unapproved-routes":       "Advertised routes that are not enabled",
+	"single-exit-node":        "A single exit node with no redundancy",
+	"orphaned-tags":           "Tags without owners, or owners without tagged devices",
+	"inactive-users":          "Suspended or inactive users still in policy",
+	"privileged-user-devices": "User-owned devices providing routing",
+	"ssh-access":              "Tailscale SSH rules allowing root or wide access without re-authentication",
+	"funnel-exposure":         "Funnel enabled for devices, exposing them to the internet",
+	"auth-keys":               "Long-lived reusable auth keys",
+	"tailnet-settings":        "Tailnet settings that weaken device or user admission",
+	"collection-gaps":         "Optional audit data the credentials could not read",
 }
 
 // Run executes all checks and returns findings sorted by severity.
@@ -237,24 +267,12 @@ func checkOutdatedClients(t *tailnet.Tailnet) []Finding {
 func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 	var out []Finding
 	for _, g := range t.Grants {
-		if g == nil {
-			continue
+		if g == nil || (!g.Legacy && len(g.IP) == 0) {
+			continue // no packet access, whatever its selectors say
 		}
-		allPorts := hasAllPorts(g.IP)
-		if g.Legacy {
-			allPorts = false
-			for _, dst := range g.Destinations {
-				_, p, ok := policy.SplitDestination(dst)
-				if ok && p == "*" && (len(g.IP) == 0 || hasAllPorts(g.IP)) {
-					allPorts = true
-				}
-			}
-		}
-		wildcardDst := hasWildcardDestination(g.Destinations)
-		wildcardSrc := contains(g.Sources, "*") || contains(g.Sources, "autogroup:member")
-
+		scope := grantScope(g)
 		switch {
-		case wildcardSrc && wildcardDst && allPorts:
+		case hasWildcard(g.Sources) && scope.wildcardAllPorts:
 			out = append(out, Finding{
 				Severity: High,
 				Title:    "Grant allows everything to everyone",
@@ -263,7 +281,7 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 				Why:      "This neutralizes tailnet access control entirely; any compromised device can reach any other.",
 				Next:     "Replace with explicit grants per source and destination. If this is intentional for a lab tailnet, document it.",
 			})
-		case wildcardDst && len(g.IP) == 0 && len(g.App) == 0:
+		case scope.wildcardDst:
 			out = append(out, Finding{
 				Severity: High,
 				Title:    "Grant allows all destinations",
@@ -272,7 +290,7 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 				Why:      "Any compromise of a covered source exposes the entire tailnet.",
 				Next:     "Restrict destinations to specific tags, hosts, or subnets.",
 			})
-		case allPorts && len(g.Destinations) > 0:
+		case scope.allPorts:
 			out = append(out, Finding{
 				Severity: Medium,
 				Title:    "Grant allows all ports",
@@ -284,6 +302,31 @@ func checkBroadGrants(t *tailnet.Tailnet) []Finding {
 		}
 	}
 	return out
+}
+
+type destinationScope struct {
+	wildcardDst, allPorts, wildcardAllPorts bool
+}
+
+// grantScope gives legacy ACLs and modern grants the same answer. They differ
+// only in where ports live: in the destination or in the ip field.
+func grantScope(g *tailnet.Grant) destinationScope {
+	var scope destinationScope
+	for _, dst := range g.Destinations {
+		host, ports := dst, ""
+		if h, p, ok := policy.SplitDestination(dst); ok {
+			host, ports = h, p
+		}
+		all := hasAllPorts(g.IP)
+		if g.Legacy {
+			all = coversAllPorts(ports) && (len(g.IP) == 0 || hasAllPorts(g.IP))
+		}
+		wildcard := isWildcard(host)
+		scope.wildcardDst = scope.wildcardDst || wildcard
+		scope.allPorts = scope.allPorts || all
+		scope.wildcardAllPorts = scope.wildcardAllPorts || (wildcard && all)
+	}
+	return scope
 }
 
 func checkUnapprovedRoutes(t *tailnet.Tailnet) []Finding {
@@ -480,6 +523,176 @@ func checkPrivilegedUserDevices(t *tailnet.Tailnet) []Finding {
 	return out
 }
 
+func checkSSHAccess(t *tailnet.Tailnet) []Finding {
+	var out []Finding
+	for _, r := range t.SSHRules {
+		// A check rule makes the user re-authenticate, so only accept is standing access.
+		if r == nil || !strings.EqualFold(r.Action, "accept") {
+			continue
+		}
+		root := contains(r.Users, "root") || contains(r.Users, "*")
+		wide := hasWildcard(r.Sources)
+		if !root && !wide {
+			continue
+		}
+		evidence := []string{
+			"src: " + sortedJoin(r.Sources),
+			"dst: " + sortedJoin(r.Destinations),
+			"users: " + sortedJoin(r.Users),
+		}
+		switch {
+		case root && wide:
+			out = append(out, Finding{
+				Severity: High,
+				Title:    "SSH rule gives broad root access without re-authentication",
+				Detail:   "An accept rule lets a wildcard source log in as root.",
+				Evidence: evidence,
+				Why:      "A single compromised device or account becomes root on every destination the rule covers.",
+				Next:     "Narrow the sources, use autogroup:nonroot, or change the action to check.",
+			})
+		case root:
+			out = append(out, Finding{
+				Severity: Medium,
+				Title:    "SSH rule allows root without re-authentication",
+				Detail:   "An accept rule permits root logins with no periodic check.",
+				Evidence: evidence,
+				Why:      "Standing root access outlives the moment it was needed and survives a stolen session.",
+				Next:     "Change the action to check, or log in as a non-root user.",
+			})
+		default:
+			out = append(out, Finding{
+				Severity: Low,
+				Title:    "SSH rule allows every user without re-authentication",
+				Detail:   "An accept rule lets a wildcard source log in as non-root users.",
+				Evidence: evidence,
+				Why:      "Any member's compromised device gets a shell on the destinations.",
+				Next:     "Restrict sources to the groups that need SSH.",
+			})
+		}
+	}
+	return out
+}
+
+func checkFunnelExposure(t *tailnet.Tailnet) []Finding {
+	var out []Finding
+	for _, a := range t.NodeAttrs {
+		if a == nil || !contains(a.Attrs, "funnel") {
+			continue
+		}
+		f := Finding{
+			Severity: Low,
+			Title:    "Funnel is enabled",
+			Detail:   "A nodeAttrs rule lets the targeted devices publish services to the public internet.",
+			Evidence: []string{"target: " + sortedJoin(a.Targets)},
+			Why:      "Funnel traffic comes from outside the tailnet, so access rules do not protect the published service.",
+			Next:     "Confirm each target should be internet-reachable.",
+		}
+		if hasWildcard(a.Targets) {
+			f.Severity = Medium
+			f.Title = "Funnel is enabled for every device"
+			f.Next = "Limit the funnel attribute to the tags that need it."
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// Auth keys last at most 90 days, so this leaves the ones with most of that ahead.
+const longLivedKey = 30 * 24 * time.Hour
+
+func checkAuthKeys(t *tailnet.Tailnet) []Finding {
+	var out []Finding
+	now := referenceTime(t)
+	for _, k := range t.AuthKeys {
+		if k == nil || !k.Reusable || k.Expires.IsZero() {
+			continue
+		}
+		left := k.Expires.Sub(now)
+		if left <= longLivedKey {
+			continue
+		}
+		f := Finding{
+			Severity: Low,
+			Title:    "Reusable auth key has more than 30 days left",
+			Subject:  k.ID,
+			Detail:   "A reusable auth key can join any number of devices until it expires.",
+			Evidence: []string{
+				fmt.Sprintf("key: %s (%s)", k.ID, orDash(k.Description)),
+				"expires: " + k.Expires.Format("2006-01-02"),
+				fmt.Sprintf("tags: %s, ephemeral: %t, preauthorized: %t", orDash(sortedJoin(k.Tags)), k.Ephemeral, k.Preauthorized),
+			},
+			Why:  "A leaked reusable key is a standing way into the tailnet.",
+			Next: "Prefer short-lived or single-use keys, or an OAuth client that mints them.",
+		}
+		if k.Preauthorized {
+			f.Severity = Medium
+			f.Title = "Reusable pre-authorized auth key has more than 30 days left"
+			f.Why = "A leaked pre-authorized key joins devices without passing device approval."
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+func checkTailnetSettings(t *tailnet.Tailnet) []Finding {
+	s := t.Settings
+	if s == nil {
+		return nil
+	}
+	var out []Finding
+	if !s.DevicesApprovalOn {
+		out = append(out, Finding{
+			Severity: Low,
+			Title:    "Device approval is off",
+			Detail:   "New devices join the tailnet without an admin approving them.",
+			Why:      "Any stolen login or auth key can add a device immediately.",
+			Next:     "Turn on device approval in the admin console's device settings.",
+		})
+	}
+	if !s.UsersApprovalOn {
+		out = append(out, Finding{
+			Severity: Low,
+			Title:    "User approval is off",
+			Detail:   "Anyone who can sign in to your identity provider domain can join the tailnet.",
+			Why:      "Access follows the identity provider alone, with no tailnet-side review.",
+			Next:     "Turn on user approval in the admin console's user settings.",
+		})
+	}
+	if s.DevicesKeyDurationDays > 180 {
+		out = append(out, Finding{
+			Severity: Low,
+			Title:    "Device key lifetime is over 180 days",
+			Detail:   fmt.Sprintf("Device keys last %d days before re-authentication.", s.DevicesKeyDurationDays),
+			Why:      "A long key lifetime lets a lost device stay connected for months.",
+			Next:     "Shorten the key expiry in the admin console's device settings.",
+		})
+	}
+	if !s.DevicesAutoUpdatesOn {
+		out = append(out, Finding{
+			Severity: Info,
+			Title:    "Client auto-updates are off by default",
+			Detail:   "New devices do not enable Tailscale auto-updates by default.",
+			Why:      "Security fixes reach devices only when someone updates them.",
+			Next:     "Turn on auto-updates in the admin console's device settings.",
+		})
+	}
+	return out
+}
+
+func checkCollectionGaps(t *tailnet.Tailnet) []Finding {
+	if len(t.CollectionGaps) == 0 {
+		return nil
+	}
+	return []Finding{{
+		Severity: Info,
+		Title:    "Some optional audit data could not be read",
+		Detail:   "Checks that depend on this data were skipped.",
+		Evidence: t.CollectionGaps,
+		Why:      "A clean result for those checks only means they did not run.",
+		Next:     "Grant the credentials read access to this data.",
+	}}
+}
+
 // --- helpers ---
 
 func evidenceDevices(devs []*tailnet.Device) []string {
@@ -552,9 +765,17 @@ func referencedInPolicy(t *tailnet.Tailnet, logins []string) []string {
 		}
 	}
 	for _, grant := range t.Grants {
+		if grant == nil {
+			continue
+		}
 		for _, source := range grant.Sources {
 			if contains(logins, source) {
 				refs = append(refs, "grant source: "+source)
+			}
+		}
+		for _, destination := range grant.Destinations {
+			if host, _, ok := policy.SplitDestination(destination); ok && contains(logins, host) {
+				refs = append(refs, "grant destination: "+host)
 			}
 		}
 	}
@@ -585,21 +806,44 @@ func referencedInPolicy(t *tailnet.Tailnet, logins []string) []string {
 		}
 	}
 	sort.Strings(refs)
-	return refs
+	return slices.Compact(refs)
 }
 
 func hasAllPorts(entries []string) bool {
 	for _, entry := range entries {
-		if entry == "*" || entry == "*:*" || strings.HasSuffix(entry, ":*") {
+		_, spec, qualified := strings.Cut(entry, ":")
+		if !qualified {
+			spec = entry
+		}
+		if coversAllPorts(spec) {
 			return true
 		}
 	}
 	return false
 }
 
-func hasWildcardDestination(destinations []string) bool {
-	for _, dst := range destinations {
-		if dst == "*" || strings.HasPrefix(dst, "*:") {
+// coversAllPorts also accepts spelled-out ranges. Port 0 is not a real service
+// port, so 1-65535 counts.
+func coversAllPorts(spec string) bool {
+	for _, r := range policy.PortRanges(spec) {
+		if r[0] <= 1 && r[1] == 65535 {
+			return true
+		}
+	}
+	return false
+}
+
+func isWildcard(selector string) bool {
+	switch selector {
+	case "*", "autogroup:danger-all", "0.0.0.0/0", "::/0":
+		return true
+	}
+	return false
+}
+
+func hasWildcard(selectors []string) bool {
+	for _, s := range selectors {
+		if isWildcard(s) || s == "autogroup:member" {
 			return true
 		}
 	}
@@ -636,12 +880,11 @@ var leadingCount = regexp.MustCompile(`^\d+\s+`)
 func findingSubject(rule string, f Finding) string {
 	title := leadingCount.ReplaceAllString(f.Title, "")
 	switch rule {
-	case "broad-grants":
+	case "broad-grants", "ssh-access", "funnel-exposure":
 		ev := append([]string(nil), f.Evidence...)
 		sort.Strings(ev)
 		sum := sha256.Sum256([]byte(strings.Join(ev, "\x00")))
 		return hex.EncodeToString(sum[:])
-
 	}
 	return title
 }

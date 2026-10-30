@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/huza1fa/taildoc/internal/tailnet"
 )
 
 func sampleFindings() []Finding {
@@ -200,5 +202,55 @@ func TestRenderJSONEmptyIsArray(t *testing.T) {
 	}
 	if string(data) != "[]" {
 		t.Errorf("RenderJSON(nil) = %s, want []", data)
+	}
+}
+
+func TestRenderSARIFMeetsCodeScanningRequirements(t *testing.T) {
+	findings := Run(&tailnet.Tailnet{Grants: []*tailnet.Grant{
+		{Sources: []string{"*"}, Destinations: []string{"*"}, IP: []string{"*"}},
+		{Sources: []string{"group:eng"}, Destinations: []string{"tag:db"}, IP: []string{"*"}},
+	}})
+	data, err := RenderSARIF(findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Runs []struct {
+			Tool struct {
+				Driver struct {
+					Rules []struct {
+						ID               string `json:"id"`
+						ShortDescription struct {
+							Text string `json:"text"`
+						} `json:"shortDescription"`
+					} `json:"rules"`
+				} `json:"driver"`
+			} `json:"tool"`
+			Results []struct {
+				RuleID    string `json:"ruleId"`
+				Locations []struct {
+					PhysicalLocation struct {
+						ArtifactLocation struct {
+							URI string `json:"uri"`
+						} `json:"artifactLocation"`
+					} `json:"physicalLocation"`
+				} `json:"locations"`
+			} `json:"results"`
+		} `json:"runs"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	run := doc.Runs[0]
+	if len(run.Tool.Driver.Rules) != 1 || run.Tool.Driver.Rules[0].ID != "broad-grants" || run.Tool.Driver.Rules[0].ShortDescription.Text == "" {
+		t.Fatalf("rules = %+v", run.Tool.Driver.Rules)
+	}
+	if len(run.Results) != 2 {
+		t.Fatalf("results = %+v", run.Results)
+	}
+	for _, r := range run.Results {
+		if r.RuleID != "broad-grants" || len(r.Locations) != 1 || r.Locations[0].PhysicalLocation.ArtifactLocation.URI == "" {
+			t.Errorf("result = %+v", r)
+		}
 	}
 }

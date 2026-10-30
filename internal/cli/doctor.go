@@ -51,10 +51,14 @@ func runDoctor(ctx context.Context, args []string) error {
 		}
 	}
 	if *collectLive {
-		if _, err := collect(ctx); err != nil {
+		t, err := collect(ctx)
+		if err != nil {
 			checks = append(checks, doctorCheck{"live collection", doctorFailed, err.Error()})
 		} else {
 			checks = append(checks, doctorCheck{"live collection", doctorOK, "users, devices, and policy are readable"})
+			for _, gap := range t.CollectionGaps {
+				checks = append(checks, doctorCheck{"optional data", doctorWarning, gap})
+			}
 		}
 	}
 

@@ -118,8 +118,167 @@ func TestCheckBroadGrantsAllPortsWithSrc(t *testing.T) {
 func TestCheckBroadGrantsRequiresWildcardSourceForEverything(t *testing.T) {
 	tt := &tailnet.Tailnet{Grants: []*tailnet.Grant{{Sources: []string{"group:ops"}, Destinations: []string{"*"}, IP: []string{"tcp:*"}}}}
 	findings := checkBroadGrants(tt)
-	if len(findings) != 1 || findings[0].Title != "Grant allows all ports" {
+	if len(findings) != 1 || findings[0].Title != "Grant allows all destinations" {
 		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckBroadGrantsTreatsLegacyAndModernRulesAlike(t *testing.T) {
+	cases := []struct {
+		name           string
+		modern, legacy tailnet.Grant
+		want           string
+	}{
+		{"group to everything",
+			tailnet.Grant{Sources: []string{"group:eng"}, Destinations: []string{"*"}, IP: []string{"*"}},
+			tailnet.Grant{Sources: []string{"group:eng"}, Destinations: []string{"*:*"}, Legacy: true},
+			"Grant allows all destinations"},
+		{"everyone to one port everywhere",
+			tailnet.Grant{Sources: []string{"*"}, Destinations: []string{"*"}, IP: []string{"tcp:443"}},
+			tailnet.Grant{Sources: []string{"*"}, Destinations: []string{"*:443"}, Legacy: true},
+			"Grant allows all destinations"},
+		{"everyone to everything",
+			tailnet.Grant{Sources: []string{"*"}, Destinations: []string{"*"}, IP: []string{"*"}},
+			tailnet.Grant{Sources: []string{"*"}, Destinations: []string{"*:*"}, Legacy: true},
+			"Grant allows everything to everyone"},
+		{"danger-all to the whole internet",
+			tailnet.Grant{Sources: []string{"autogroup:danger-all"}, Destinations: []string{"0.0.0.0/0", "::/0"}, IP: []string{"*"}},
+			tailnet.Grant{Sources: []string{"autogroup:danger-all"}, Destinations: []string{"0.0.0.0/0:*", "::/0:*"}, Legacy: true},
+			"Grant allows everything to everyone"},
+		{"spelled-out port range",
+			tailnet.Grant{Sources: []string{"group:eng"}, Destinations: []string{"tag:db"}, IP: []string{"tcp:1-65535"}},
+			tailnet.Grant{Sources: []string{"group:eng"}, Destinations: []string{"tag:db:1-65535"}, Legacy: true},
+			"Grant allows all ports"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			for _, g := range []tailnet.Grant{c.modern, c.legacy} {
+				findings := checkBroadGrants(&tailnet.Tailnet{Grants: []*tailnet.Grant{&g}})
+				if len(findings) != 1 || findings[0].Title != c.want {
+					t.Errorf("legacy=%t findings = %+v, want %q", g.Legacy, findings, c.want)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckBroadGrantsPairsWildcardWithItsOwnPorts(t *testing.T) {
+	g := &tailnet.Grant{Sources: []string{"*"}, Destinations: []string{"*:443", "tag:db:*"}, Legacy: true}
+	findings := checkBroadGrants(&tailnet.Tailnet{Grants: []*tailnet.Grant{g}})
+	if len(findings) != 1 || findings[0].Title != "Grant allows all destinations" {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckBroadGrantsIgnoresAppOnlyGrants(t *testing.T) {
+	g := &tailnet.Grant{Sources: []string{"*"}, Destinations: []string{"*"}, App: map[string][]map[string]any{"example.com/cap": {{}}}}
+	if findings := checkBroadGrants(&tailnet.Tailnet{Grants: []*tailnet.Grant{g}}); len(findings) != 0 {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckInactiveUsersFindsDestinationReferences(t *testing.T) {
+	tt := &tailnet.Tailnet{
+		Users:  []*tailnet.User{{LoginName: "gone@example.com", Status: "suspended"}},
+		Grants: []*tailnet.Grant{nil, {Sources: []string{"group:eng"}, Destinations: []string{"gone@example.com:*"}, Legacy: true}},
+	}
+	findings := checkInactiveUsers(tt)
+	if len(findings) != 1 || !strings.Contains(strings.Join(findings[0].Evidence, "\n"), "grant destination: gone@example.com") {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestPrivilegedDevicesIgnoreTaggedRouters(t *testing.T) {
+	tt := &tailnet.Tailnet{Devices: []*tailnet.Device{{Hostname: "router", Owner: "alice@example.com", Tags: []string{"tag:infra"}, AdvertisedRoutes: []string{"10.0.0.0/8"}}}}
+	if findings := checkPrivilegedUserDevices(tt); len(findings) != 0 {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckSSHAccess(t *testing.T) {
+	cases := []struct {
+		name string
+		rule tailnet.SSHRule
+		want Severity
+	}{
+		{"broad root", tailnet.SSHRule{Action: "accept", Sources: []string{"autogroup:member"}, Users: []string{"root"}}, High},
+		{"wildcard user", tailnet.SSHRule{Action: "accept", Sources: []string{"*"}, Users: []string{"*"}}, High},
+		{"scoped root", tailnet.SSHRule{Action: "accept", Sources: []string{"group:ops"}, Users: []string{"root"}}, Medium},
+		{"broad nonroot", tailnet.SSHRule{Action: "accept", Sources: []string{"autogroup:member"}, Users: []string{"autogroup:nonroot"}}, Low},
+		{"check mode", tailnet.SSHRule{Action: "check", Sources: []string{"*"}, Users: []string{"root"}}, ""},
+		{"scoped nonroot", tailnet.SSHRule{Action: "accept", Sources: []string{"group:ops"}, Users: []string{"deploy"}}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			findings := checkSSHAccess(&tailnet.Tailnet{SSHRules: []*tailnet.SSHRule{&c.rule}})
+			if c.want == "" {
+				if len(findings) != 0 {
+					t.Fatalf("unexpected findings: %+v", findings)
+				}
+				return
+			}
+			if len(findings) != 1 || findings[0].Severity != c.want {
+				t.Fatalf("findings = %+v, want %s", findings, c.want)
+			}
+		})
+	}
+}
+
+func TestCheckFunnelExposure(t *testing.T) {
+	tt := &tailnet.Tailnet{NodeAttrs: []*tailnet.NodeAttr{
+		{Targets: []string{"autogroup:member"}, Attrs: []string{"funnel"}},
+		{Targets: []string{"tag:web"}, Attrs: []string{"funnel"}},
+		{Targets: []string{"*"}, Attrs: []string{"mullvad"}},
+	}}
+	findings := checkFunnelExposure(tt)
+	if len(findings) != 2 || findings[0].Severity != Medium || findings[1].Severity != Low {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckAuthKeys(t *testing.T) {
+	now := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	long, short := now.Add(60*24*time.Hour), now.Add(5*24*time.Hour)
+	tt := &tailnet.Tailnet{CollectedAt: now, AuthKeys: []*tailnet.AuthKey{
+		{ID: "preauth", Reusable: true, Preauthorized: true, Expires: long},
+		{ID: "reusable", Reusable: true, Expires: long},
+		{ID: "soon", Reusable: true, Expires: short},
+		{ID: "single", Expires: long},
+	}}
+	findings := checkAuthKeys(tt)
+	if len(findings) != 2 || findings[0].Severity != Medium || findings[0].Subject != "preauth" || findings[1].Severity != Low {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckTailnetSettings(t *testing.T) {
+	if findings := checkTailnetSettings(&tailnet.Tailnet{}); findings != nil {
+		t.Fatalf("no settings should produce no findings: %+v", findings)
+	}
+	safe := &tailnet.Settings{DevicesApprovalOn: true, UsersApprovalOn: true, DevicesAutoUpdatesOn: true, DevicesKeyDurationDays: 90}
+	if findings := checkTailnetSettings(&tailnet.Tailnet{Settings: safe}); len(findings) != 0 {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+	if findings := checkTailnetSettings(&tailnet.Tailnet{Settings: &tailnet.Settings{DevicesKeyDurationDays: 365}}); len(findings) != 4 {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestCheckCollectionGaps(t *testing.T) {
+	findings := checkCollectionGaps(&tailnet.Tailnet{CollectionGaps: []string{"auth keys: forbidden"}})
+	if len(findings) != 1 || findings[0].Severity != Info || findings[0].Evidence[0] != "auth keys: forbidden" {
+		t.Fatalf("unexpected findings: %+v", findings)
+	}
+}
+
+func TestEveryCheckIsNamedAndSummarized(t *testing.T) {
+	if len(checks) != len(CheckNames) {
+		t.Fatalf("%d checks but %d names", len(checks), len(CheckNames))
+	}
+	for _, name := range CheckNames {
+		if checkSummaries[name] == "" {
+			t.Errorf("check %q has no summary", name)
+		}
 	}
 }
 
