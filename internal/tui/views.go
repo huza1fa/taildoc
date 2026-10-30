@@ -229,7 +229,6 @@ func routesBlock(d *tailnet.Device) string {
 	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
-func keyExpiryLong(d *tailnet.Device) string { return keyExpiryLongAt(d, time.Now()) }
 func keyExpiryLongAt(d *tailnet.Device, at time.Time) string {
 	switch {
 	case d.KeyExpiryDisabled:

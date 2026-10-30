@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/huza1fa/taildoc/internal/auth"
 )
@@ -18,6 +19,10 @@ const (
 	doctorWarning doctorStatus = "warning"
 	doctorFailed  doctorStatus = "failed"
 )
+
+// Windows reports the same mode for every file, so access there rests on the
+// ACLs of the user's profile, which taildoc does not inspect.
+const windowsPermissions = "permissions not checked on Windows"
 
 type doctorCheck struct {
 	Name   string
@@ -137,6 +142,8 @@ func configSafetyChecks(path string) []doctorCheck {
 		checks = append(checks, doctorCheck{"config file", doctorWarning, "is a symbolic link; use a regular file with mode 0600 for stored credentials"})
 	case !info.Mode().IsRegular():
 		checks = append(checks, doctorCheck{"config file", doctorWarning, "is not a regular file"})
+	case runtime.GOOS == "windows":
+		checks = append(checks, doctorCheck{"config file", doctorOK, windowsPermissions})
 	case info.Mode().Perm()&0o077 != 0:
 		checks = append(checks, doctorCheck{"config file", doctorWarning, fmt.Sprintf("permissions are %04o; expected 0600", info.Mode().Perm())})
 	default:
@@ -152,6 +159,8 @@ func configSafetyChecks(path string) []doctorCheck {
 		checks = append(checks, doctorCheck{"config directory", doctorFailed, fmt.Sprintf("cannot inspect %s: %v", dir, err)})
 	case !dirInfo.IsDir():
 		checks = append(checks, doctorCheck{"config directory", doctorFailed, "is not a directory"})
+	case runtime.GOOS == "windows":
+		checks = append(checks, doctorCheck{"config directory", doctorOK, windowsPermissions})
 	case dirInfo.Mode().Perm()&0o077 != 0:
 		checks = append(checks, doctorCheck{"config directory", doctorWarning, fmt.Sprintf("permissions are %04o; expected 0700", dirInfo.Mode().Perm())})
 	default:

@@ -49,10 +49,6 @@ var (
 			Foreground(colorDim).
 			Padding(0, 1)
 
-	statusActiveTabStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(colorAccent)
-
 	overlayBoxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(colorAccent).

@@ -30,7 +30,7 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
+	if perm := info.Mode().Perm(); perm != 0o600 && runtime.GOOS != "windows" {
 		t.Errorf("file perms = %o, want 600", perm)
 	}
 
@@ -55,7 +55,7 @@ func TestSaveDirPerms(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
+	if perm := info.Mode().Perm(); perm != 0o700 && runtime.GOOS != "windows" {
 		t.Errorf("dir perms = %o, want 700", perm)
 	}
 }

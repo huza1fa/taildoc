@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -35,6 +36,9 @@ func TestLocalDoctorChecksReportsPrivateConfigWithoutLeakingSecret(t *testing.T)
 }
 
 func TestConfigSafetyChecksWarnsOnBroadPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows does not model POSIX file modes")
+	}
 	path := filepath.Join(t.TempDir(), "config.json")
 	if err := auth.Save(&auth.Credentials{Method: auth.MethodAPIKey, APIKey: "secret"}, path); err != nil {
 		t.Fatal(err)

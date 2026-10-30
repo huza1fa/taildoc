@@ -90,7 +90,7 @@ func collectUsers(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet) 
 }
 
 func collectDevices(ctx context.Context, c *tailscale.Client, t *tailnet.Tailnet) error {
-	devices, err := c.Devices().ListWithAllFields(ctx)
+	devices, err := c.Devices().List(ctx, tailscale.WithFields(tailscale.IncludeFieldsAll))
 	if err != nil {
 		return fmt.Errorf("listing devices (token may lack device read scope or admin role): %w", err)
 	}
